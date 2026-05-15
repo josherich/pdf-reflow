@@ -1,5 +1,7 @@
 # pdf_reflow — single-column mobile reflow for PDFs
 
+From ![before](./tests/fixtures/before.png) to ![after](./tests/fixtures/after.png) in one step.
+
 Convert any text-heavy PDF (academic paper, manual, datasheet) into a
 single-column PDF sized for a phone screen. Diagrams and equations are
 rasterized from the original page and scaled to fit the new column width;
