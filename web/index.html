@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>pdf_reflow — WASM demo</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main>
+    <header>
+      <h1>pdf_reflow <span class="tag">WASM demo</span></h1>
+      <p class="lede">
+        Reflow a multi-column desktop PDF into a single-column phone-sized PDF,
+        in the browser. The Python pipeline runs unchanged via Pyodide;
+        PyMuPDF (MuPDF + WASM) does the parsing and rasterizing. Your file
+        never leaves the page.
+      </p>
+    </header>
+
+    <section class="card">
+      <div class="row">
+        <label class="field">
+          <span>Source PDF</span>
+          <input id="file" type="file" accept="application/pdf,.pdf" />
+        </label>
+      </div>
+
+      <div class="row three">
+        <label class="field">
+          <span>Device preset</span>
+          <select id="preset"></select>
+        </label>
+        <label class="field">
+          <span>Body size (pt)</span>
+          <input id="body-size" type="number" min="6" max="20" step="0.5" value="11" />
+        </label>
+        <label class="field">
+          <span>Figure DPI</span>
+          <input id="figure-dpi" type="number" min="72" max="300" step="10" value="150" />
+        </label>
+      </div>
+
+      <div class="row actions">
+        <button id="reflow" type="button">Reflow PDF</button>
+        <a id="download" href="#" hidden>Download reflowed PDF</a>
+      </div>
+
+      <div id="progress" class="progress" hidden>
+        <div class="progress-bar"><div class="progress-fill"></div></div>
+        <span id="progress-eta" class="progress-eta"></span>
+      </div>
+
+      <p id="status" class="status" data-kind="info">Loading…</p>
+      <p id="stats" class="stats"></p>
+    </section>
+
+    <details class="card">
+      <summary>Console</summary>
+      <pre id="log"></pre>
+    </details>
+
+    <footer>
+      <p>
+        Source &amp; CLI in
+        <a href="../README.md"><code>pdf_reflow/</code></a>.
+        The reflow algorithm (paragraph detection, column inference,
+        figure-band extraction, reading order, line breaking, paginated
+        output) is heuristic + geometry — no ML, no third-party layout engine.
+      </p>
+    </footer>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/pyodide/v0.27.7/full/pyodide.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

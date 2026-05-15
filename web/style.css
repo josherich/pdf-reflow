@@ -1,0 +1,212 @@
+:root {
+  --bg: #f7f6f1;
+  --fg: #1c1b18;
+  --muted: #6b6b66;
+  --line: #d8d6cc;
+  --accent: #2d59c8;
+  --accent-fg: #fff;
+  --warn: #b25c00;
+  --error: #b00020;
+  --ok: #1f7a3a;
+  --card-bg: #fff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14140f;
+    --fg: #ebe7d8;
+    --muted: #9b9888;
+    --line: #2e2d27;
+    --accent: #8ab0ff;
+    --accent-fg: #0a0a08;
+    --warn: #ffb066;
+    --error: #ff8a8a;
+    --ok: #7ad99a;
+    --card-bg: #1c1b16;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  line-height: 1.5;
+}
+
+main {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 2.5rem 1.25rem 4rem;
+}
+
+header h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.75rem;
+  letter-spacing: -0.01em;
+}
+
+.tag {
+  display: inline-block;
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 0.15rem 0.5rem;
+  margin-left: 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  vertical-align: middle;
+}
+
+.lede {
+  margin: 0 0 1.5rem;
+  color: var(--muted);
+  max-width: 60ch;
+}
+
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 1.25rem 1.25rem;
+  margin-bottom: 1.25rem;
+}
+
+.row { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 0.85rem; }
+.row.three .field { flex: 1 1 0; min-width: 8rem; }
+.row.actions { align-items: center; }
+
+.field { display: flex; flex-direction: column; gap: 0.25rem; flex: 1 1 100%; }
+.field span {
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.field input, .field select {
+  font: inherit;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+button#reflow {
+  font: inherit;
+  font-weight: 600;
+  padding: 0.65rem 1.2rem;
+  background: var(--accent);
+  color: var(--accent-fg);
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+}
+button#reflow:disabled { opacity: 0.5; cursor: not-allowed; }
+
+a#download {
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+  padding: 0.55rem 0.9rem;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+}
+a#download:hover { text-decoration: underline; }
+
+/* Progress bar. The fill animates via CSS transform so the bar keeps
+   moving on the compositor thread while pyodide.runPython blocks the
+   main JS thread for the reflow's duration. */
+.progress {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.85rem;
+}
+.progress-bar {
+  flex: 1;
+  height: 6px;
+  background: var(--line);
+  border-radius: 3px;
+  overflow: hidden;
+  position: relative;
+}
+.progress-fill {
+  position: absolute;
+  inset: 0;
+  background: var(--accent);
+  transform: scaleX(0);
+  transform-origin: left center;
+}
+.progress-fill.determinate {
+  /* JS sets `transition-duration` to the estimated runtime and then
+     toggles `transform: scaleX(0.99)`; the compositor handles the
+     interpolation so it runs while runPython is blocking. */
+  transition-property: transform;
+  transition-timing-function: linear;
+}
+.progress-fill.finishing {
+  transition: transform 0.3s ease-out;
+  transform: scaleX(1) !important;
+}
+.progress-fill.indeterminate {
+  /* Used while Pyodide / PyMuPDF are still loading and we don't have
+     a duration estimate yet. */
+  animation: indeterminate 1.4s ease-in-out infinite;
+  transform-origin: left center;
+}
+@keyframes indeterminate {
+  0%   { transform: translateX(-100%) scaleX(0.4); }
+  50%  { transform: translateX(20%) scaleX(0.6); }
+  100% { transform: translateX(120%) scaleX(0.4); }
+}
+.progress-eta {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.8rem;
+  color: var(--muted);
+  min-width: 4ch;
+  text-align: right;
+}
+
+.status {
+  margin: 0.5rem 0 0;
+  font-size: 0.9rem;
+}
+.status[data-kind="busy"]  { color: var(--accent); }
+.status[data-kind="error"] { color: var(--error); }
+.status[data-kind="warn"]  { color: var(--warn); }
+.status[data-kind="ready"] { color: var(--ok); }
+.status[data-kind="info"]  { color: var(--muted); }
+
+.stats { margin: 0.3rem 0 0; color: var(--muted); font-size: 0.9rem; }
+
+details summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--muted);
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+pre#log {
+  margin: 0.75rem 0 0;
+  padding: 0.85rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font: 0.8rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  max-height: 14rem;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+footer {
+  margin-top: 2rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+footer a { color: var(--accent); }
