@@ -18,9 +18,10 @@ const PYODIDE_INDEX_URL = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/
 // `web/build-pymupdf-wheel.sh` and committed under web/wheels/.
 const PYMUPDF_WHEEL_URL = "wheels/pymupdf.whl";
 
-// Files copied into the Pyodide virtual filesystem under /pdf_reflow/. The
-// order doesn't matter for plain modules; we just enumerate every file the
-// package needs.
+// Files fetched from src/pdf_reflow/ (relative to site root) and copied into
+// the Pyodide virtual filesystem under /pdf_reflow/. The deploy workflow puts
+// src/pdf_reflow/*.py alongside the web/ files so this path resolves on both
+// GitHub Pages and a local server started from the repo root.
 const PDF_REFLOW_SOURCES = [
   "__init__.py",
   "__main__.py",
@@ -214,7 +215,7 @@ async function ensurePyodide() {
     setStatus("Loading pdf_reflow Python sources…", "busy");
     pyodide.FS.mkdirTree("/pdf_reflow");
     for (const name of PDF_REFLOW_SOURCES) {
-      const resp = await fetch(`../src/pdf_reflow/${name}`);
+      const resp = await fetch(`src/pdf_reflow/${name}`);
       if (!resp.ok) {
         throw new Error(`Failed to fetch src/pdf_reflow/${name}: ${resp.status}`);
       }

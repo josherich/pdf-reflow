@@ -83,8 +83,8 @@ The script:
    `web/wheels/`.
 
 **Step 3 — serve the project root.** The page fetches
-`../src/pdf_reflow/*.py` over HTTP, so you can't open `index.html`
-via `file://`. Serve from `pdf_reflow/`:
+`src/pdf_reflow/*.py` over HTTP, so you can't open `index.html`
+via `file://`. Serve from the repo root:
 
 ```bash
 # from readings/pdf_reflow/
@@ -98,22 +98,32 @@ the page is fully offline.
 
 ## Deploy as a static site
 
-Copy `web/` and `src/pdf_reflow/` to any static host (GitHub Pages,
-Cloudflare Pages, Netlify, S3+CloudFront, …). The relative paths in
-`app.js` assume the layout:
+### GitHub Pages (automated)
+
+Push to `main`. The workflow at `.github/workflows/deploy.yml` assembles
+the site artifact (copies `web/` + `src/pdf_reflow/*.py`) and deploys via
+`actions/deploy-pages`. Enable Pages in the repo settings:
+**Settings → Pages → Source → GitHub Actions**.
+
+### Other static hosts
+
+The site artifact layout (what the GitHub Actions workflow produces, and
+what any host needs) is:
 
 ```
 site-root/
-  web/index.html
-  web/app.js
-  web/style.css
-  web/wheels/pymupdf.whl          # built locally, committed as LFS or asset
+  index.html
+  app.js
+  style.css
+  wheels/pymupdf.whl          # built locally, committed as LFS or asset
   src/pdf_reflow/*.py
 ```
 
-No build step at deploy time. No bundler. Pyodide is loaded from the
-jsdelivr CDN; the PyMuPDF wheel is loaded from the same origin as
-the demo.
+Assemble it manually and upload to Cloudflare Pages, Netlify,
+S3+CloudFront, or any static host.
+
+No build step. No bundler. Pyodide is loaded from the jsdelivr CDN; the
+PyMuPDF wheel is loaded from the same origin as the demo.
 
 The wheel is around 30–60 MB. If you don't want it inside your repo,
 upload it to a CORS-enabled bucket and change `PYMUPDF_WHEEL_URL` in
