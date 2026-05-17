@@ -5,6 +5,8 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @State private var pickerPresented = false
     @State private var originalDocument: PDFDocument?
+    @State private var originalData: Data?
+    @State private var originalSignature: String?
     @State private var reflowedDocument: PDFDocument?
     @State private var showingReflow = false
     @State private var reflowing = false
@@ -137,6 +139,8 @@ struct ContentView: View {
             return
         }
         originalDocument = doc
+        originalData = data
+        originalSignature = ReflowCache.shared.signature(for: data)
         reflowedDocument = nil
         showingReflow = false
         displayName = url.deletingPathExtension().lastPathComponent
@@ -145,13 +149,15 @@ struct ContentView: View {
 
     private func closeDocument() {
         originalDocument = nil
+        originalData = nil
+        originalSignature = nil
         reflowedDocument = nil
         showingReflow = false
         displayName = "PDF Reflow"
     }
 
     private func toggleReflow() async {
-        guard let original = originalDocument else { return }
+        guard originalDocument != nil else { return }
 
         if showingReflow {
             showingReflow = false
@@ -161,8 +167,22 @@ struct ContentView: View {
             showingReflow = true
             return
         }
-        guard let data = original.dataRepresentation() else {
+        guard let data = originalData ?? originalDocument?.dataRepresentation() else {
             error = "Could not serialize the loaded PDF."
+            return
+        }
+
+        let signature = originalSignature ?? ReflowCache.shared.signature(for: data)
+        let cacheKey = ReflowCache.shared.key(
+            signature: signature,
+            fontSize: settings.fontSize,
+            ppi: settings.imagePPI
+        )
+
+        if let cached = ReflowCache.shared.read(key: cacheKey),
+           let doc = PDFDocument(data: cached) {
+            reflowedDocument = doc
+            showingReflow = true
             return
         }
 
@@ -178,6 +198,7 @@ struct ContentView: View {
 
         do {
             let reflowed = try await engine.reflow(pdfData: data, preset: preset)
+            ReflowCache.shared.write(key: cacheKey, data: reflowed)
             guard let doc = PDFDocument(data: reflowed) else {
                 throw ReflowError.invalidResponse
             }

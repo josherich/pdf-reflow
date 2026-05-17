@@ -1,5 +1,4 @@
 import SwiftUI
-import WebKit
 
 struct SettingsView: View {
     @ObservedObject var settings: AppSettings
@@ -13,7 +12,7 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Cache") {
+                Section {
                     HStack {
                         Text("Files")
                         Spacer()
@@ -39,6 +38,10 @@ struct SettingsView: View {
                         }
                     }
                     .disabled(clearing || (cacheFileCount == 0 && cacheByteSize == 0))
+                } header: {
+                    Text("Reflow cache")
+                } footer: {
+                    Text("Reflowed PDFs are stored on disk and reused when you open the same file (matched by content, not name).")
                 }
 
                 Section("Reflow") {
@@ -86,7 +89,7 @@ struct SettingsView: View {
     private func refreshCacheStats() async {
         scanning = true
         let stats = await Task.detached(priority: .utility) {
-            CacheInspector.scan()
+            ReflowCache.shared.stats()
         }.value
         cacheFileCount = stats.fileCount
         cacheByteSize = stats.totalBytes
@@ -96,64 +99,9 @@ struct SettingsView: View {
     private func clearCache() async {
         clearing = true
         await Task.detached(priority: .utility) {
-            CacheInspector.clear()
+            ReflowCache.shared.clear()
         }.value
-        await clearWebData()
         clearing = false
         await refreshCacheStats()
-    }
-
-    private func clearWebData() async {
-        URLCache.shared.removeAllCachedResponses()
-        let types = WKWebsiteDataStore.allWebsiteDataTypes()
-        await WKWebsiteDataStore.default().removeData(
-            ofTypes: types,
-            modifiedSince: .distantPast
-        )
-    }
-}
-
-enum CacheInspector {
-    struct Stats { let fileCount: Int; let totalBytes: Int64 }
-
-    static func cacheDirectories() -> [URL] {
-        var dirs: [URL] = []
-        let fm = FileManager.default
-        if let caches = try? fm.url(for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: false) {
-            dirs.append(caches)
-        }
-        let tmp = fm.temporaryDirectory
-        dirs.append(tmp)
-        return dirs
-    }
-
-    static func scan() -> Stats {
-        let fm = FileManager.default
-        var count = 0
-        var bytes: Int64 = 0
-        for root in cacheDirectories() {
-            guard let enumerator = fm.enumerator(
-                at: root,
-                includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
-                options: [.skipsHiddenFiles]
-            ) else { continue }
-            for case let url as URL in enumerator {
-                guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
-                      values.isRegularFile == true else { continue }
-                count += 1
-                bytes += Int64(values.fileSize ?? 0)
-            }
-        }
-        return Stats(fileCount: count, totalBytes: bytes)
-    }
-
-    static func clear() {
-        let fm = FileManager.default
-        for root in cacheDirectories() {
-            guard let contents = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { continue }
-            for item in contents {
-                try? fm.removeItem(at: item)
-            }
-        }
     }
 }
