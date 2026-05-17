@@ -37,6 +37,10 @@ Prerequisites:
 - The PyMuPDF wheel at `web/wheels/pymupdf.whl`. If it isn't checked
   into your branch, build it once with `web/build-pymupdf-wheel.sh`
   (20–40 min, see [`web/README.md`](../web/README.md)).
+- A 1024×1024 `AppIcon.png` at
+  `PDFReflow/Assets.xcassets/AppIcon.appiconset/AppIcon.png`. The
+  asset catalog references it by filename; Xcode synthesises all
+  smaller sizes at build time.
 
 Then either:
 
