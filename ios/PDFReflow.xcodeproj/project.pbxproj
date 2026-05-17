@@ -13,6 +13,8 @@
 		E400000000000000000000E4 /* ReflowEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = F400000000000000000000F4 /* ReflowEngine.swift */; };
 		E500000000000000000000E5 /* BridgeSchemeHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = F500000000000000000000F5 /* BridgeSchemeHandler.swift */; };
 		EA00000000000000000000EA /* RecentPDFsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA00000000000000000000FA /* RecentPDFsStore.swift */; };
+		EB00000000000000000000EB /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB00000000000000000000FB /* AppSettings.swift */; };
+		EC00000000000000000000EC /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC00000000000000000000FC /* SettingsView.swift */; };
 		E600000000000000000000E6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F600000000000000000000F6 /* Assets.xcassets */; };
 		E700000000000000000000E7 /* ReflowBridge in Resources */ = {isa = PBXBuildFile; fileRef = F700000000000000000000F7 /* ReflowBridge */; };
 		E800000000000000000000E8 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F800000000000000000000F8 /* Preview Assets.xcassets */; };
@@ -25,6 +27,8 @@
 		F400000000000000000000F4 /* ReflowEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReflowEngine.swift; sourceTree = "<group>"; };
 		F500000000000000000000F5 /* BridgeSchemeHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeSchemeHandler.swift; sourceTree = "<group>"; };
 		FA00000000000000000000FA /* RecentPDFsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentPDFsStore.swift; sourceTree = "<group>"; };
+		FB00000000000000000000FB /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
+		FC00000000000000000000FC /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		F600000000000000000000F6 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F700000000000000000000F7 /* ReflowBridge */ = {isa = PBXFileReference; lastKnownFileType = folder; path = ReflowBridge; sourceTree = "<group>"; };
 		F800000000000000000000F8 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
@@ -59,6 +63,8 @@
 				F400000000000000000000F4 /* ReflowEngine.swift */,
 				F500000000000000000000F5 /* BridgeSchemeHandler.swift */,
 				FA00000000000000000000FA /* RecentPDFsStore.swift */,
+				FB00000000000000000000FB /* AppSettings.swift */,
+				FC00000000000000000000FC /* SettingsView.swift */,
 				F700000000000000000000F7 /* ReflowBridge */,
 				F600000000000000000000F6 /* Assets.xcassets */,
 				D300000000000000000000D3 /* Preview Content */,
@@ -181,6 +187,8 @@
 				E400000000000000000000E4 /* ReflowEngine.swift in Sources */,
 				E500000000000000000000E5 /* BridgeSchemeHandler.swift in Sources */,
 				EA00000000000000000000EA /* RecentPDFsStore.swift in Sources */,
+				EB00000000000000000000EB /* AppSettings.swift in Sources */,
+				EC00000000000000000000EC /* SettingsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

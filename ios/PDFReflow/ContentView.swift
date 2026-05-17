@@ -10,9 +10,11 @@ struct ContentView: View {
     @State private var reflowing = false
     @State private var error: String?
     @State private var displayName = "PDF Reflow"
+    @State private var settingsPresented = false
 
     @StateObject private var engine = ReflowEngine()
     @StateObject private var recents = RecentPDFsStore()
+    @StateObject private var settings = AppSettings()
 
     private var displayed: PDFDocument? {
         showingReflow ? reflowedDocument : originalDocument
@@ -47,6 +49,9 @@ struct ContentView: View {
                 allowsMultipleSelection: false,
                 onCompletion: handlePicker
             )
+            .sheet(isPresented: $settingsPresented) {
+                SettingsView(settings: settings)
+            }
             .alert("Error", isPresented: Binding(
                 get: { error != nil },
                 set: { if !$0 { error = nil } }
@@ -61,6 +66,14 @@ struct ContentView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         if displayed == nil {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    settingsPresented = true
+                } label: {
+                    Label("Settings", systemImage: "gearshape")
+                }
+                .accessibilityLabel("Settings")
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 SortMenu(sort: $recents.sort)
             }
@@ -156,8 +169,15 @@ struct ContentView: View {
         reflowing = true
         defer { reflowing = false }
 
+        let preset = ReflowPreset(
+            pageWidth: ReflowPreset.iphone17.pageWidth,
+            pageHeight: ReflowPreset.iphone17.pageHeight,
+            bodySize: settings.fontSize,
+            figureDpi: settings.imagePPI
+        )
+
         do {
-            let reflowed = try await engine.reflow(pdfData: data)
+            let reflowed = try await engine.reflow(pdfData: data, preset: preset)
             guard let doc = PDFDocument(data: reflowed) else {
                 throw ReflowError.invalidResponse
             }
