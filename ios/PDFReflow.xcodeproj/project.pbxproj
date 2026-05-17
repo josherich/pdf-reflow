@@ -12,6 +12,7 @@
 		E300000000000000000000E3 /* PDFViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F300000000000000000000F3 /* PDFViewer.swift */; };
 		E400000000000000000000E4 /* ReflowEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = F400000000000000000000F4 /* ReflowEngine.swift */; };
 		E500000000000000000000E5 /* BridgeSchemeHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = F500000000000000000000F5 /* BridgeSchemeHandler.swift */; };
+		EA00000000000000000000EA /* RecentPDFsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA00000000000000000000FA /* RecentPDFsStore.swift */; };
 		E600000000000000000000E6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F600000000000000000000F6 /* Assets.xcassets */; };
 		E700000000000000000000E7 /* ReflowBridge in Resources */ = {isa = PBXBuildFile; fileRef = F700000000000000000000F7 /* ReflowBridge */; };
 		E800000000000000000000E8 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F800000000000000000000F8 /* Preview Assets.xcassets */; };
@@ -23,6 +24,7 @@
 		F300000000000000000000F3 /* PDFViewer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFViewer.swift; sourceTree = "<group>"; };
 		F400000000000000000000F4 /* ReflowEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReflowEngine.swift; sourceTree = "<group>"; };
 		F500000000000000000000F5 /* BridgeSchemeHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeSchemeHandler.swift; sourceTree = "<group>"; };
+		FA00000000000000000000FA /* RecentPDFsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentPDFsStore.swift; sourceTree = "<group>"; };
 		F600000000000000000000F6 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F700000000000000000000F7 /* ReflowBridge */ = {isa = PBXFileReference; lastKnownFileType = folder; path = ReflowBridge; sourceTree = "<group>"; };
 		F800000000000000000000F8 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
@@ -56,6 +58,7 @@
 				F300000000000000000000F3 /* PDFViewer.swift */,
 				F400000000000000000000F4 /* ReflowEngine.swift */,
 				F500000000000000000000F5 /* BridgeSchemeHandler.swift */,
+				FA00000000000000000000FA /* RecentPDFsStore.swift */,
 				F700000000000000000000F7 /* ReflowBridge */,
 				F600000000000000000000F6 /* Assets.xcassets */,
 				D300000000000000000000D3 /* Preview Content */,
@@ -177,6 +180,7 @@
 				E300000000000000000000E3 /* PDFViewer.swift in Sources */,
 				E400000000000000000000E4 /* ReflowEngine.swift in Sources */,
 				E500000000000000000000E5 /* BridgeSchemeHandler.swift in Sources */,
+				EA00000000000000000000EA /* RecentPDFsStore.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

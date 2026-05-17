@@ -12,6 +12,7 @@ struct ContentView: View {
     @State private var displayName = "PDF Reflow"
 
     @StateObject private var engine = ReflowEngine()
+    @StateObject private var recents = RecentPDFsStore()
 
     private var displayed: PDFDocument? {
         showingReflow ? reflowedDocument : originalDocument
@@ -24,7 +25,13 @@ struct ContentView: View {
                     PDFViewer(document: doc)
                         .ignoresSafeArea(edges: .bottom)
                 } else {
-                    EmptyStateView { pickerPresented = true }
+                    RecentsHomeView(
+                        recents: recents,
+                        onOpenRecent: openRecent
+                    )
+                    .safeAreaInset(edge: .bottom) {
+                        BottomOpenBar { pickerPresented = true }
+                    }
                 }
 
                 if reflowing {
@@ -33,30 +40,7 @@ struct ContentView: View {
             }
             .navigationTitle(navigationTitle)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        pickerPresented = true
-                    } label: {
-                        Label("Open PDF", systemImage: "folder")
-                    }
-                    .accessibilityLabel("Open PDF")
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        Task { await toggleReflow() }
-                    } label: {
-                        Label(
-                            showingReflow ? "Original" : "Reflow",
-                            systemImage: showingReflow
-                                ? "doc.plaintext"
-                                : "iphone.gen3"
-                        )
-                    }
-                    .disabled(originalDocument == nil || reflowing)
-                    .accessibilityLabel(showingReflow ? "Show original" : "Reflow for mobile")
-                }
-            }
+            .toolbar { toolbarContent }
             .fileImporter(
                 isPresented: $pickerPresented,
                 allowedContentTypes: [.pdf],
@@ -74,8 +58,40 @@ struct ContentView: View {
         }
     }
 
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        if displayed == nil {
+            ToolbarItem(placement: .topBarTrailing) {
+                SortMenu(sort: $recents.sort)
+            }
+        } else {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    closeDocument()
+                } label: {
+                    Label("Library", systemImage: "chevron.backward")
+                }
+                .accessibilityLabel("Back to library")
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    Task { await toggleReflow() }
+                } label: {
+                    Label(
+                        showingReflow ? "Original" : "Reflow",
+                        systemImage: showingReflow
+                            ? "doc.plaintext"
+                            : "iphone.gen3"
+                    )
+                }
+                .disabled(originalDocument == nil || reflowing)
+                .accessibilityLabel(showingReflow ? "Show original" : "Reflow for mobile")
+            }
+        }
+    }
+
     private var navigationTitle: String {
-        guard originalDocument != nil else { return displayName }
+        guard originalDocument != nil else { return "PDF Reflow" }
         return showingReflow ? "\(displayName) — Reflowed" : displayName
     }
 
@@ -87,6 +103,15 @@ struct ContentView: View {
             guard let url = urls.first else { return }
             loadPDF(at: url)
         }
+    }
+
+    private func openRecent(_ item: RecentPDF) {
+        guard let resolved = recents.resolve(item) else {
+            error = "Couldn't locate \(item.name)."
+            recents.remove(item)
+            return
+        }
+        loadPDF(at: resolved.url)
     }
 
     private func loadPDF(at url: URL) {
@@ -102,6 +127,14 @@ struct ContentView: View {
         reflowedDocument = nil
         showingReflow = false
         displayName = url.deletingPathExtension().lastPathComponent
+        recents.record(url: url, size: Int64(data.count))
+    }
+
+    private func closeDocument() {
+        originalDocument = nil
+        reflowedDocument = nil
+        showingReflow = false
+        displayName = "PDF Reflow"
     }
 
     private func toggleReflow() async {
@@ -136,25 +169,134 @@ struct ContentView: View {
     }
 }
 
-private struct EmptyStateView: View {
-    let action: () -> Void
+private struct SortMenu: View {
+    @Binding var sort: RecentsSort
 
+    var body: some View {
+        Menu {
+            Picker("Sort", selection: $sort) {
+                ForEach(RecentsSort.allCases) { option in
+                    Text(option.label).tag(option)
+                }
+            }
+        } label: {
+            Label("Sort", systemImage: "arrow.up.arrow.down")
+        }
+        .accessibilityLabel("Sort recents")
+    }
+}
+
+private struct RecentsHomeView: View {
+    @ObservedObject var recents: RecentPDFsStore
+    let onOpenRecent: (RecentPDF) -> Void
+
+    var body: some View {
+        Group {
+            if recents.items.isEmpty {
+                EmptyRecentsView()
+            } else {
+                List {
+                    Section("Recent PDFs") {
+                        ForEach(recents.sorted) { item in
+                            Button {
+                                onOpenRecent(item)
+                            } label: {
+                                RecentRow(item: item)
+                            }
+                            .buttonStyle(.plain)
+                            .swipeActions {
+                                Button(role: .destructive) {
+                                    recents.remove(item)
+                                } label: {
+                                    Label("Remove", systemImage: "trash")
+                                }
+                            }
+                        }
+                    }
+                }
+                .listStyle(.insetGrouped)
+            }
+        }
+    }
+}
+
+private struct RecentRow: View {
+    let item: RecentPDF
+
+    private static let dateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f
+    }()
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "doc.richtext")
+                .font(.title2)
+                .foregroundStyle(.tint)
+                .frame(width: 32)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.name)
+                    .font(.body.weight(.medium))
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(Self.dateFormatter.string(from: item.lastOpened))
+                    Text("·")
+                    Text(ByteCountFormatter.string(fromByteCount: item.size, countStyle: .file))
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .contentShape(Rectangle())
+        .padding(.vertical, 4)
+    }
+}
+
+private struct EmptyRecentsView: View {
     var body: some View {
         VStack(spacing: 18) {
             Image(systemName: "doc.richtext")
                 .font(.system(size: 56, weight: .light))
                 .foregroundStyle(.secondary)
-            Text("Open a PDF to begin")
+            Text("No recent PDFs")
                 .font(.title3.weight(.medium))
-            Text("Tap the reflow button to switch to a single-column phone view.")
+            Text("Open a PDF to get started. Tap the reflow button later to switch to a single-column phone view.")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 32)
-            Button("Choose PDF", action: action)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
+}
+
+private struct BottomOpenBar: View {
+    let action: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Divider()
+            HStack {
+                Spacer()
+                Button(action: action) {
+                    Label("Open PDF", systemImage: "folder")
+                        .font(.body.weight(.semibold))
+                        .frame(minWidth: 200)
+                }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
+                Spacer()
+            }
+            .padding(.vertical, 12)
+            .padding(.horizontal, 16)
         }
-        .padding()
+        .background(.bar)
     }
 }
 
