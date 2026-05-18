@@ -6,13 +6,25 @@ struct RecentPDF: Identifiable, Codable, Equatable {
     var bookmark: Data
     var lastOpened: Date
     var size: Int64
+    /// SHA-256 of the PDF bytes, used to locate cached reflowed variants.
+    /// Optional for backward compatibility with entries persisted before this
+    /// field existed.
+    var signature: String?
 
-    init(id: UUID = UUID(), name: String, bookmark: Data, lastOpened: Date, size: Int64) {
+    init(
+        id: UUID = UUID(),
+        name: String,
+        bookmark: Data,
+        lastOpened: Date,
+        size: Int64,
+        signature: String? = nil
+    ) {
         self.id = id
         self.name = name
         self.bookmark = bookmark
         self.lastOpened = lastOpened
         self.size = size
+        self.signature = signature
     }
 }
 
@@ -70,7 +82,7 @@ final class RecentPDFsStore: ObservableObject {
         }
     }
 
-    func record(url: URL, size: Int64) {
+    func record(url: URL, size: Int64, signature: String? = nil) {
         let name = url.deletingPathExtension().lastPathComponent
         let bookmark: Data
         do {
@@ -89,7 +101,13 @@ final class RecentPDFsStore: ObservableObject {
         }
 
         items.insert(
-            RecentPDF(name: name, bookmark: bookmark, lastOpened: Date(), size: size),
+            RecentPDF(
+                name: name,
+                bookmark: bookmark,
+                lastOpened: Date(),
+                size: size,
+                signature: signature
+            ),
             at: 0
         )
         if items.count > Self.maxItems {

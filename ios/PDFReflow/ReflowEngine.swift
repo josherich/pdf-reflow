@@ -32,6 +32,11 @@ struct ReflowPreset {
 @MainActor
 final class ReflowEngine: NSObject, ObservableObject {
 
+    /// True once the WebView has loaded and bridge.js has finished warming
+    /// Pyodide. Used to decide whether a reflow estimate should include
+    /// cold-start overhead.
+    @Published private(set) var isReady: Bool = false
+
     private var webView: WKWebView?
     private var schemeHandler: BridgeSchemeHandler?
 
@@ -127,6 +132,7 @@ final class ReflowEngine: NSObject, ObservableObject {
     fileprivate func handleReady() {
         readyContinuation?.resume()
         readyContinuation = nil
+        isReady = true
     }
 
     fileprivate func handleEngineError(_ message: String) {
