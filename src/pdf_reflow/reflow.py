@@ -25,6 +25,13 @@ class ReflowConfig:
     # (capped at 8). Small docs always run sequentially to avoid pool
     # startup overhead.
     workers: Optional[int] = 1
+    # Optional half-open page range [page_start, page_end) on the source
+    # document. ``page_end=None`` means "through the last page". Used by
+    # the iOS app's progressive-preview flow to reflow only the first
+    # handful of pages up front, then kick off the full reflow in the
+    # background.
+    page_start: int = 0
+    page_end: Optional[int] = None
 
     def to_layout(self) -> LayoutConfig:
         return LayoutConfig(
@@ -110,7 +117,15 @@ def reflow_pdf(src_path: str, dst_path: str, cfg: Optional[ReflowConfig] = None)
 
     doc = fitz.open(src_path)
     try:
-        if workers and workers > 1:
+        total = doc.page_count
+        end = cfg.page_end if cfg.page_end is not None else total
+        start = max(0, min(cfg.page_start, total))
+        end = max(start, min(end, total))
+        partial = (start, end) != (0, total)
+
+        if partial:
+            pages = extract_document(doc, page_indices=range(start, end))
+        elif workers and workers > 1:
             pages = extract_document_parallel(src_path, workers=workers)
         else:
             pages = extract_document(doc)

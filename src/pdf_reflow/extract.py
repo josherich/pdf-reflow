@@ -11,7 +11,7 @@ from __future__ import annotations
 import concurrent.futures
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import fitz
 
@@ -157,8 +157,20 @@ def extract_page(page: fitz.Page, index: int) -> PageContent:
     return pc
 
 
-def extract_document(doc: fitz.Document) -> List[PageContent]:
-    return [extract_page(doc[i], i) for i in range(doc.page_count)]
+def extract_document(
+    doc: fitz.Document,
+    *,
+    page_indices: Optional["Iterable[int]"] = None,
+) -> List[PageContent]:
+    """Extract pages from ``doc``.
+
+    ``page_indices`` lets callers extract only a subset (e.g. the first
+    10 pages for a preview reflow). The ``PageContent.index`` retains
+    the *source* page index so downstream figure rasterization still
+    targets the right page.
+    """
+    indices = range(doc.page_count) if page_indices is None else page_indices
+    return [extract_page(doc[i], i) for i in indices]
 
 
 # ---------------------------------------------------------------------------

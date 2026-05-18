@@ -48,17 +48,26 @@ final class ReflowEngine: NSObject, ObservableObject {
     /// Set by `MessageProxy` once `bridge.js` signals readiness.
     fileprivate var readyContinuation: CheckedContinuation<Void, Error>?
 
-    func reflow(pdfData: Data, preset: ReflowPreset = .iphone17) async throws -> Data {
+    func reflow(
+        pdfData: Data,
+        preset: ReflowPreset = .iphone17,
+        pageRange: Range<Int>? = nil
+    ) async throws -> Data {
         let webView = try await ensureReady()
 
+        var cfg: [String: Any] = [
+            "page_width": preset.pageWidth,
+            "page_height": preset.pageHeight,
+            "body_size": preset.bodySize,
+            "figure_dpi": preset.figureDpi,
+        ]
+        if let range = pageRange {
+            cfg["page_start"] = range.lowerBound
+            cfg["page_end"] = range.upperBound
+        }
         let arguments: [String: Any] = [
             "b64": pdfData.base64EncodedString(),
-            "cfg": [
-                "page_width": preset.pageWidth,
-                "page_height": preset.pageHeight,
-                "body_size": preset.bodySize,
-                "figure_dpi": preset.figureDpi,
-            ],
+            "cfg": cfg,
         ]
 
         let result: Any?

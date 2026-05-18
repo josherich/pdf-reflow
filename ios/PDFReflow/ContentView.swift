@@ -8,10 +8,17 @@ struct ContentView: View {
     @State private var originalData: Data?
     @State private var originalSignature: String?
     @State private var reflowedDocument: PDFDocument?
+    @State private var reflowedIsPartial = false
     @State private var showingReflow = false
     @State private var reflowing = false
     @State private var reflowProgress: Double = 0
     @State private var reflowProgressTimer: Timer?
+    @State private var backgroundReflowing = false
+    @State private var backgroundProgress: Double = 0
+    @State private var backgroundProgressTimer: Timer?
+    @State private var backgroundTask: Task<Void, Never>?
+    @State private var previewPageCount = 0
+    @State private var totalPageCount = 0
     @State private var error: String?
     @State private var displayName = "PDF Reflow"
     @State private var settingsPresented = false
@@ -30,6 +37,15 @@ struct ContentView: View {
                 if let doc = displayed {
                     PDFViewer(document: doc)
                         .ignoresSafeArea(edges: .bottom)
+                        .safeAreaInset(edge: .bottom) {
+                            if showingReflow && backgroundReflowing {
+                                BackgroundReflowBar(
+                                    progress: backgroundProgress,
+                                    previewCount: previewPageCount,
+                                    totalPages: totalPageCount
+                                )
+                            }
+                        }
                 } else {
                     RecentsHomeView(
                         recents: recents,
@@ -140,36 +156,58 @@ struct ContentView: View {
             error = "Could not read \(url.lastPathComponent)."
             return
         }
+        cancelBackgroundReflow()
         originalDocument = doc
         originalData = data
         originalSignature = ReflowCache.shared.signature(for: data)
         reflowedDocument = nil
+        reflowedIsPartial = false
         showingReflow = false
+        previewPageCount = 0
+        totalPageCount = doc.pageCount
         displayName = url.deletingPathExtension().lastPathComponent
         recents.record(url: url, size: Int64(data.count), signature: originalSignature)
     }
 
     private func closeDocument() {
+        cancelBackgroundReflow()
         originalDocument = nil
         originalData = nil
         originalSignature = nil
         reflowedDocument = nil
+        reflowedIsPartial = false
         showingReflow = false
+        previewPageCount = 0
+        totalPageCount = 0
         displayName = "PDF Reflow"
     }
 
+    /// Number of pages to render up-front when the user taps Reflow. Returns
+    /// nil for tiny documents where the full reflow is fast enough that
+    /// the preview hop just adds latency.
+    private func previewCount(for totalPages: Int) -> Int? {
+        switch totalPages {
+        case ...5: return nil
+        case 6...10: return 3
+        case 11...20: return 5
+        default: return 10
+        }
+    }
+
     private func toggleReflow() async {
-        guard originalDocument != nil else { return }
+        guard let originalDoc = originalDocument else { return }
 
         if showingReflow {
             showingReflow = false
             return
         }
         if reflowedDocument != nil {
+            // Even if we only have the partial preview so far, just show
+            // what we have — the background full reflow keeps running.
             showingReflow = true
             return
         }
-        guard let data = originalData ?? originalDocument?.dataRepresentation() else {
+        guard let data = originalData ?? originalDoc.dataRepresentation() else {
             error = "Could not serialize the loaded PDF."
             return
         }
@@ -184,11 +222,46 @@ struct ContentView: View {
         if let cached = ReflowCache.shared.read(key: cacheKey),
            let doc = PDFDocument(data: cached) {
             reflowedDocument = doc
+            reflowedIsPartial = false
             showingReflow = true
             return
         }
 
-        let pageCount = originalDocument?.pageCount ?? 1
+        let pageCount = originalDoc.pageCount
+        let preset = ReflowPreset(
+            pageWidth: ReflowPreset.iphone17.pageWidth,
+            pageHeight: ReflowPreset.iphone17.pageHeight,
+            bodySize: settings.fontSize,
+            figureDpi: settings.imagePPI
+        )
+
+        totalPageCount = pageCount
+        previewPageCount = previewCount(for: pageCount) ?? pageCount
+
+        if let preview = previewCount(for: pageCount), preview < pageCount {
+            await runPreviewThenBackground(
+                data: data,
+                preset: preset,
+                cacheKey: cacheKey,
+                previewCount: preview,
+                totalPages: pageCount
+            )
+        } else {
+            await runFullBlocking(
+                data: data,
+                preset: preset,
+                cacheKey: cacheKey,
+                pageCount: pageCount
+            )
+        }
+    }
+
+    private func runFullBlocking(
+        data: Data,
+        preset: ReflowPreset,
+        cacheKey: String,
+        pageCount: Int
+    ) async {
         let wasColdStart = !engine.isReady
         let estimated = ReflowDurationEstimator.shared.estimate(
             pageCount: pageCount,
@@ -203,13 +276,6 @@ struct ContentView: View {
             stopProgressAnimation()
         }
 
-        let preset = ReflowPreset(
-            pageWidth: ReflowPreset.iphone17.pageWidth,
-            pageHeight: ReflowPreset.iphone17.pageHeight,
-            bodySize: settings.fontSize,
-            figureDpi: settings.imagePPI
-        )
-
         do {
             let reflowed = try await engine.reflow(pdfData: data, preset: preset)
             ReflowDurationEstimator.shared.record(
@@ -222,10 +288,115 @@ struct ContentView: View {
                 throw ReflowError.invalidResponse
             }
             reflowedDocument = doc
+            reflowedIsPartial = false
             showingReflow = true
         } catch {
             self.error = "Reflow failed: \(error.localizedDescription)"
         }
+    }
+
+    private func runPreviewThenBackground(
+        data: Data,
+        preset: ReflowPreset,
+        cacheKey: String,
+        previewCount: Int,
+        totalPages: Int
+    ) async {
+        let wasColdStart = !engine.isReady
+        let previewEstimated = ReflowDurationEstimator.shared.estimate(
+            pageCount: previewCount,
+            includeColdStart: wasColdStart
+        )
+
+        reflowing = true
+        startProgressAnimation(estimatedDuration: previewEstimated)
+        let previewStartedAt = Date()
+
+        do {
+            let preview = try await engine.reflow(
+                pdfData: data,
+                preset: preset,
+                pageRange: 0..<previewCount
+            )
+            ReflowDurationEstimator.shared.record(
+                pageCount: previewCount,
+                duration: Date().timeIntervalSince(previewStartedAt),
+                wasColdStart: wasColdStart
+            )
+            guard let previewDoc = PDFDocument(data: preview) else {
+                throw ReflowError.invalidResponse
+            }
+            reflowedDocument = previewDoc
+            reflowedIsPartial = true
+            showingReflow = true
+        } catch {
+            self.error = "Reflow failed: \(error.localizedDescription)"
+            reflowing = false
+            stopProgressAnimation()
+            return
+        }
+
+        reflowing = false
+        stopProgressAnimation()
+
+        startBackgroundFullReflow(
+            data: data,
+            preset: preset,
+            cacheKey: cacheKey,
+            totalPages: totalPages
+        )
+    }
+
+    private func startBackgroundFullReflow(
+        data: Data,
+        preset: ReflowPreset,
+        cacheKey: String,
+        totalPages: Int
+    ) {
+        backgroundTask?.cancel()
+        backgroundReflowing = true
+        let estimated = ReflowDurationEstimator.shared.estimate(
+            pageCount: totalPages,
+            includeColdStart: false
+        )
+        startBackgroundProgressAnimation(estimatedDuration: estimated)
+
+        backgroundTask = Task { @MainActor in
+            let started = Date()
+            defer {
+                backgroundReflowing = false
+                stopBackgroundProgressAnimation()
+            }
+            do {
+                let full = try await engine.reflow(pdfData: data, preset: preset)
+                try Task.checkCancellation()
+                ReflowDurationEstimator.shared.record(
+                    pageCount: totalPages,
+                    duration: Date().timeIntervalSince(started),
+                    wasColdStart: false
+                )
+                ReflowCache.shared.write(key: cacheKey, data: full)
+                guard let doc = PDFDocument(data: full) else {
+                    throw ReflowError.invalidResponse
+                }
+                // Only swap in if the user is still on the same source PDF.
+                // (closeDocument / loadPDF cancel us, so reaching here means
+                // we're still relevant.)
+                reflowedDocument = doc
+                reflowedIsPartial = false
+            } catch is CancellationError {
+                // user moved on; drop the result.
+            } catch {
+                self.error = "Full reflow failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func cancelBackgroundReflow() {
+        backgroundTask?.cancel()
+        backgroundTask = nil
+        backgroundReflowing = false
+        stopBackgroundProgressAnimation()
     }
 
     private func startProgressAnimation(estimatedDuration: TimeInterval) {
@@ -249,6 +420,27 @@ struct ContentView: View {
         reflowProgressTimer?.invalidate()
         reflowProgressTimer = nil
         reflowProgress = 1.0
+    }
+
+    private func startBackgroundProgressAnimation(estimatedDuration: TimeInterval) {
+        backgroundProgressTimer?.invalidate()
+        backgroundProgress = 0
+        let started = Date()
+        let ceiling = 0.97
+        let duration = max(estimatedDuration, 1.0)
+        backgroundProgressTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in
+            Task { @MainActor in
+                let elapsed = Date().timeIntervalSince(started)
+                let fraction = elapsed / duration
+                backgroundProgress = ceiling * (1.0 - exp(-3.0 * fraction))
+            }
+        }
+    }
+
+    private func stopBackgroundProgressAnimation() {
+        backgroundProgressTimer?.invalidate()
+        backgroundProgressTimer = nil
+        backgroundProgress = 1.0
     }
 }
 
@@ -382,6 +574,35 @@ private struct BottomOpenBar: View {
             .padding(.vertical, 12)
             .padding(.horizontal, 16)
         }
+        .background(.bar)
+    }
+}
+
+private struct BackgroundReflowBar: View {
+    let progress: Double
+    let previewCount: Int
+    let totalPages: Int
+
+    var body: some View {
+        let clamped = max(0, min(progress, 1))
+        let remaining = max(0, totalPages - previewCount)
+        VStack(spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.caption)
+                Text("Reflowing remaining \(remaining) page\(remaining == 1 ? "" : "s")…")
+                    .font(.caption)
+                Spacer()
+                Text("\(Int(clamped * 100))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            ProgressView(value: clamped)
+                .progressViewStyle(.linear)
+                .animation(.easeOut(duration: 0.2), value: clamped)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
         .background(.bar)
     }
 }
