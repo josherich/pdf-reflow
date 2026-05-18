@@ -12,6 +12,9 @@
 		E300000000000000000000E3 /* PDFViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F300000000000000000000F3 /* PDFViewer.swift */; };
 		E400000000000000000000E4 /* ReflowEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = F400000000000000000000F4 /* ReflowEngine.swift */; };
 		E500000000000000000000E5 /* BridgeSchemeHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = F500000000000000000000F5 /* BridgeSchemeHandler.swift */; };
+		E600000000000000000000E6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F600000000000000000000F6 /* Assets.xcassets */; };
+		E700000000000000000000E7 /* ReflowBridge in Resources */ = {isa = PBXBuildFile; fileRef = F700000000000000000000F7 /* ReflowBridge */; };
+		E800000000000000000000E8 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F800000000000000000000F8 /* Preview Assets.xcassets */; };
 		EA00000000000000000000EA /* RecentPDFsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA00000000000000000000FA /* RecentPDFsStore.swift */; };
 		EB00000000000000000000EB /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB00000000000000000000FB /* AppSettings.swift */; };
 		EC00000000000000000000EC /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC00000000000000000000FC /* SettingsView.swift */; };
@@ -37,6 +40,10 @@
 		F700000000000000000000F7 /* ReflowBridge */ = {isa = PBXFileReference; lastKnownFileType = folder; path = ReflowBridge; sourceTree = "<group>"; };
 		F800000000000000000000F8 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		F900000000000000000000F9 /* PDFReflow.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PDFReflow.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		FA00000000000000000000FA /* RecentPDFsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentPDFsStore.swift; sourceTree = "<group>"; };
+		FB00000000000000000000FB /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
+		FC00000000000000000000FC /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		FD00000000000000000000FD /* ReflowCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReflowCache.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -330,6 +337,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "\"PDFReflow/Preview Content\"";
+				DEVELOPMENT_TEAM = Q5M43LPRH2;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "PDF Reflow";
@@ -344,7 +352,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.example.pdfreflow;
+				PRODUCT_BUNDLE_IDENTIFIER = com.josherich.pdfreflow;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
@@ -360,6 +368,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "\"PDFReflow/Preview Content\"";
+				DEVELOPMENT_TEAM = Q5M43LPRH2;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "PDF Reflow";
@@ -374,7 +383,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.example.pdfreflow;
+				PRODUCT_BUNDLE_IDENTIFIER = com.josherich.pdfreflow;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
