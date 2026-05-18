@@ -413,6 +413,22 @@ def _group_blocks(lines: List[Line], page_index: int, body_size: float = 10.0) -
         cur_minor_head = _line_is_minor_heading(ln, body_size)
         # Numbered reference list items always start a new block.
         cur_list_item = _line_starts_list_item(ln)
+        # First-line indent: when a line is meaningfully indented
+        # compared to the block's column-left edge (the minimum x0 of
+        # all lines already in the current block), it's the indented
+        # first line of a new paragraph — e.g. IEEE format indents
+        # paragraph starts ~9pt past the column edge, and the same
+        # indent appears on numbered list items like ``1) US letter
+        # margins``. Without this rule, all paragraphs inside a section
+        # fuse into one body block and the list items disappear.
+        min_x0 = min(l.bbox[0] for l in current)
+        cur_para_indent = (
+            ln.bbox[0] - min_x0 > 4.0
+            and len(current) >= 1
+            # Only break for plausible body-text indents, not centered
+            # display equations or random horizontally shifted lines.
+            and not cur_math
+        )
         # Heuristic: tight gap (< 0.9 * size) and same approximate font size and some x-overlap => same block.
         if (
             same_size and gap <= max(1.2 * prev_size, 6.0) and x_overlap > -4.0
@@ -421,6 +437,7 @@ def _group_blocks(lines: List[Line], page_index: int, body_size: float = 10.0) -
             and not prev_minor_head
             and not cur_minor_head
             and not cur_list_item
+            and not cur_para_indent
         ):
             current.append(ln)
         else:

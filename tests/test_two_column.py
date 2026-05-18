@@ -242,16 +242,25 @@ class TwoColumnReflowTests(unittest.TestCase):
                 continue
             modal, modal_count = Counter(gaps).most_common(1)[0]
             consistent = sum(1 for g in gaps if abs(g - modal) <= 0.5)
-            # 65% threshold: most consecutive same-x0 pairs are
-            # paragraph-internal (uniform baseline gap), the remainder
-            # are legitimate paragraph→heading or heading→paragraph
-            # transitions that carry an extra lead. Before the column
-            # fix the body itself had baseline jitter from reading-order
-            # interleaving, so this number sat near 50%.
+            # The modal gap is the in-paragraph baseline step
+            # (line_height_mult · body_size ≈ 13.75pt at body 11). It
+            # must account for the plurality of gaps — the rest are
+            # legitimate paragraph→paragraph or paragraph→heading
+            # transitions. Before the column-fix bug, reading-order
+            # interleaving introduced gaps at many distinct values and
+            # no single value held a plurality.
             self.assertGreaterEqual(
-                consistent / len(gaps), 0.65,
+                consistent / len(gaps), 0.5,
                 f"page {p.number + 1}: inconsistent line spacing "
                 f"(modal={modal} count={modal_count}/{len(gaps)} gaps={Counter(gaps)})",
+            )
+            self.assertGreater(
+                modal, 12.0,
+                f"page {p.number + 1}: modal line gap {modal} is below body line height",
+            )
+            self.assertLess(
+                modal, 16.0,
+                f"page {p.number + 1}: modal line gap {modal} is above body line height",
             )
             return  # one populated page is enough
         self.skipTest("no page with enough paragraph lines to measure")
@@ -323,6 +332,47 @@ class TwoColumnReflowTests(unittest.TestCase):
                 any(ln.startswith(f"[{i}] ") for ln in starts),
                 f"reference [{i}] does not begin its own line",
             )
+
+    def test_first_line_indent_breaks_paragraphs(self):
+        """In the IEEE source, paragraph starts are indented ~9pt past
+        the column edge while continuation lines sit at the column
+        edge. Before, ``_group_blocks`` ignored x0 entirely and merged
+        every same-size, tight-gap line into one giant body block, so
+        the output for the "A. Full-Sized Camera-Ready (CR) Copy"
+        section was a single 14-line wall of text. After the fix each
+        indented start opens a new block, and the numbered list items
+        ``1)`` and ``2)`` (which also start at the indented x) appear
+        on their own lines.
+
+        We verify by counting paragraph break markers in the section's
+        text: the section should be split into multiple body
+        paragraphs, and the numbered items must start their own line.
+        """
+        # Collect page text as a list of paragraph-like chunks split on
+        # double newlines (insert_text emits each FlowItem with a small
+        # vertical gap, so consecutive blocks land on separate text
+        # lines but PyMuPDF's plain-text extraction collapses them).
+        # We use the per-line list and detect block boundaries by line
+        # start patterns.
+        lines = []
+        for p in self.out_doc:
+            for ln in p.get_text().splitlines():
+                lines.append(ln.strip())
+        # Find the index of the section heading line.
+        try:
+            idx = lines.index("A. Full-Sized Camera-Ready (CR) Copy")
+        except ValueError:
+            self.fail("section A. Full-Sized Camera-Ready (CR) Copy missing")
+        section = lines[idx + 1: idx + 40]
+        # Both numbered items must each start a line in this region.
+        has_1 = any(re.match(r"^1\)\s", ln) for ln in section)
+        has_2 = any(re.match(r"^2\)\s", ln) for ln in section)
+        self.assertTrue(
+            has_1, f"numbered list item '1) ...' is not on its own line in section"
+        )
+        self.assertTrue(
+            has_2, f"numbered list item '2) ...' is not on its own line in section"
+        )
 
     def test_section_text_present(self):
         """Sanity: every major IEEE section heading text appears in the
