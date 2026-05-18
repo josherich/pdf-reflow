@@ -7,6 +7,7 @@ that capture the original visual content.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from collections import Counter
 from typing import List, Optional, Tuple
@@ -206,6 +207,99 @@ def _split_runin_subheading_line(line: "Line") -> List["Line"]:
     ]
 
 
+# Numbered reference list items: '[1] G. Eason ...', '[12] ...'. Each new
+# item must start its own block so wrapped continuation lines stay with
+# the right item and the rendered output reads as a vertical list.
+_LIST_ITEM_RE = re.compile(r"^\s*\[\d+\]\s")
+
+
+def _line_starts_list_item(line: "Line") -> bool:
+    return bool(_LIST_ITEM_RE.match(line.text))
+
+
+def _line_italic_score(line: "Line") -> float:
+    """Fraction of non-whitespace chars on the line whose span is italic."""
+    italic = 0
+    total = 0
+    for s in line.spans:
+        n = sum(1 for c in s.text if not c.isspace())
+        total += n
+        if s.is_italic:
+            italic += n
+    return italic / total if total else 0.0
+
+
+def _line_is_smallcaps_section_head(line: "Line", body_size: float) -> bool:
+    """Detect an IEEE-style section heading rendered as small caps at
+    body size: ``I. INTRODUCTION``, ``ACKNOWLEDGMENT``, ``REFERENCES``.
+
+    Heuristics:
+      - mostly uppercase Latin letters (≥85% of alpha chars)
+      - short single line (< 80 chars)
+      - approx body size (small-caps spans are tagged at ~80% size for
+        the secondary glyphs but the line's dominant size is body)
+      - has at least three letters (rules out single-letter labels)
+    """
+    text = line.text.strip()
+    if not text or len(text) > 80:
+        return False
+    letters = [c for c in text if c.isalpha()]
+    if len(letters) < 3:
+        return False
+    if sum(1 for c in letters if c.isupper()) / len(letters) < 0.85:
+        return False
+    if line.size > body_size + 1.5 or line.size < body_size - 4.0:
+        return False
+    return True
+
+
+def _line_is_italic_subheading(line: "Line", body_size: float) -> bool:
+    """Detect an IEEE-style sub-section heading rendered as a short
+    italic line at body size: ``A. Full-Sized Camera-Ready (CR) Copy``,
+    ``B. References``, ``A. Figures and Tables``.
+
+    Required: ≥80% italic glyphs, short single line, ≈ body size, and a
+    letter-period prefix (``A.``, ``B.``, ``C.``…) — the prefix
+    constraint keeps run-of-mill italicized words in body prose from
+    being promoted to a heading.
+    """
+    text = line.text.strip()
+    if not text or len(text) > 80:
+        return False
+    if line.size > body_size + 1.5 or line.size < body_size - 1.5:
+        return False
+    if _line_italic_score(line) < 0.8:
+        return False
+    return bool(re.match(r"^[A-Z]\.\s+[A-Z]", text))
+
+
+def _line_is_minor_heading(line: "Line", body_size: float) -> bool:
+    return (
+        _line_is_smallcaps_section_head(line, body_size)
+        or _line_is_italic_subheading(line, body_size)
+    )
+
+
+def _block_all_caps(block: "Block") -> bool:
+    text = block.text.strip()
+    letters = [c for c in text if c.isalpha()]
+    if len(letters) < 3:
+        return False
+    return sum(1 for c in letters if c.isupper()) / len(letters) >= 0.85
+
+
+def _block_italic_score(block: "Block") -> float:
+    italic = 0
+    total = 0
+    for ln in block.lines:
+        for s in ln.spans:
+            n = sum(1 for c in s.text if not c.isspace())
+            total += n
+            if s.is_italic:
+                italic += n
+    return italic / total if total else 0.0
+
+
 def _line_bold_score(line: "Line") -> float:
     """Fraction of non-whitespace chars on the line whose span is bold.
     Used to detect run-in subheadings — short fully-bold lines at body
@@ -258,7 +352,7 @@ def _group_lines(spans: List[Span]) -> List[Line]:
     return out
 
 
-def _group_blocks(lines: List[Line], page_index: int) -> List[Block]:
+def _group_blocks(lines: List[Line], page_index: int, body_size: float = 10.0) -> List[Block]:
     """Group adjacent lines with similar style into blocks."""
     if not lines:
         return []
@@ -309,11 +403,24 @@ def _group_blocks(lines: List[Line], page_index: int) -> List[Block]:
         # survives classification.
         prev_bold = _line_bold_score(prev) >= 0.8
         cur_bold = _line_bold_score(ln) >= 0.8
+        # Minor headings (IEEE small-caps section heads like
+        # "I. INTRODUCTION", italic sub-section heads like
+        # "A. Full-Sized Camera-Ready (CR) Copy") render at body size
+        # without bold weight — size + gap alone glues them to the body
+        # paragraph below. Force a block break on either side of such a
+        # line so the heading survives as its own block.
+        prev_minor_head = _line_is_minor_heading(prev, body_size)
+        cur_minor_head = _line_is_minor_heading(ln, body_size)
+        # Numbered reference list items always start a new block.
+        cur_list_item = _line_starts_list_item(ln)
         # Heuristic: tight gap (< 0.9 * size) and same approximate font size and some x-overlap => same block.
         if (
             same_size and gap <= max(1.2 * prev_size, 6.0) and x_overlap > -4.0
             and prev_math == cur_math
             and prev_bold == cur_bold
+            and not prev_minor_head
+            and not cur_minor_head
+            and not cur_list_item
         ):
             current.append(ln)
         else:
@@ -483,6 +590,29 @@ def _classify_blocks(blocks: List[Block], body_size: float) -> None:
             # output gets bold weight + a small space above, instead of
             # being typeset as plain prose because no character-count
             # majority of bold survives merge with the body paragraph.
+            b.kind = "heading"
+        elif (
+            abs(b.size - body_size) < 1.5
+            and len(b.lines) == 1
+            and 2 < len(t) < 80
+            and _block_all_caps(b)
+        ):
+            # IEEE-style small-caps section heading: ``I. INTRODUCTION``,
+            # ``ACKNOWLEDGMENT``, ``REFERENCES``. Rendered at body size
+            # without bold weight, so size + bold checks both miss it;
+            # we use the all-caps signal instead.
+            b.kind = "heading"
+        elif (
+            abs(b.size - body_size) < 1.5
+            and len(b.lines) == 1
+            and 2 < len(t) < 80
+            and _block_italic_score(b) >= 0.8
+            and re.match(r"^[A-Z]\.\s+[A-Z]", t)
+        ):
+            # IEEE-style italic sub-section heading: ``A. Full-Sized
+            # Camera-Ready (CR) Copy``, ``B. References``. The
+            # letter-period prefix keeps stray italic words in body
+            # prose from being promoted.
             b.kind = "heading"
         elif b.size <= body_size - 1.0:
             # Small text. Captions tend to be near a figure (handled later).
@@ -806,13 +936,13 @@ def _figure_regions(page: PageContent, blocks: List[Block], body_size: float) ->
     return [(b[0], b[1]) for b in merged if (b[1] - b[0]) > body_size * 1.2]
 
 
-def _lines_to_blocks(spans: List[Span], page_index: int) -> List[Block]:
+def _lines_to_blocks(spans: List[Span], page_index: int, body_size: float) -> List[Block]:
     """Group spans → lines → blocks, applying the run-in subheading split."""
     lines = _group_lines(spans)
     split_lines: List[Line] = []
     for ln in lines:
         split_lines.extend(_split_runin_subheading_line(ln))
-    return _group_blocks(split_lines, page_index)
+    return _group_blocks(split_lines, page_index, body_size)
 
 
 def _analyze_two_column(
@@ -823,9 +953,9 @@ def _analyze_two_column(
     [full-width header → left column → right column → full-width footer].
     """
     full_spans, left_spans, right_spans = _partition_spans_by_column(page.spans, mid)
-    left_blocks = _lines_to_blocks(left_spans, page.index)
-    right_blocks = _lines_to_blocks(right_spans, page.index)
-    full_blocks = _lines_to_blocks(full_spans, page.index)
+    left_blocks = _lines_to_blocks(left_spans, page.index, body_size)
+    right_blocks = _lines_to_blocks(right_spans, page.index, body_size)
+    full_blocks = _lines_to_blocks(full_spans, page.index, body_size)
     for b in left_blocks:
         b.column = 0
     for b in right_blocks:
@@ -1017,7 +1147,7 @@ def analyze_page(page: PageContent, body_size: float) -> List[FlowItem]:
     split_lines: List[Line] = []
     for ln in lines:
         split_lines.extend(_split_runin_subheading_line(ln))
-    blocks = _group_blocks(split_lines, page.index)
+    blocks = _group_blocks(split_lines, page.index, body_size)
 
     ncols = _detect_columns(blocks, page.width)
     _assign_columns(blocks, page.width, ncols)

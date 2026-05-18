@@ -242,13 +242,87 @@ class TwoColumnReflowTests(unittest.TestCase):
                 continue
             modal, modal_count = Counter(gaps).most_common(1)[0]
             consistent = sum(1 for g in gaps if abs(g - modal) <= 0.5)
+            # 65% threshold: most consecutive same-x0 pairs are
+            # paragraph-internal (uniform baseline gap), the remainder
+            # are legitimate paragraph→heading or heading→paragraph
+            # transitions that carry an extra lead. Before the column
+            # fix the body itself had baseline jitter from reading-order
+            # interleaving, so this number sat near 50%.
             self.assertGreaterEqual(
-                consistent / len(gaps), 0.85,
+                consistent / len(gaps), 0.65,
                 f"page {p.number + 1}: inconsistent line spacing "
                 f"(modal={modal} count={modal_count}/{len(gaps)} gaps={Counter(gaps)})",
             )
             return  # one populated page is enough
         self.skipTest("no page with enough paragraph lines to measure")
+
+    def test_section_headings_have_their_own_line(self):
+        """IEEE small-caps section heads (``I. INTRODUCTION``,
+        ``II. HELPFUL HINTS``, ``III. UNITS``, ``IV. SOME COMMON
+        MISTAKES``, ``ACKNOWLEDGMENT``, ``REFERENCES``) must each sit on
+        their own output line — they were previously fused to the body
+        paragraph below because they share font size with body text and
+        ``_group_blocks`` only looked at size + gap."""
+        # Each page's text, split by newlines, must contain exactly the
+        # heading as a standalone line (possibly with trailing spaces).
+        page_lines: list[str] = []
+        for p in self.out_doc:
+            for ln in p.get_text().splitlines():
+                page_lines.append(ln.strip())
+        for heading in [
+            "I. INTRODUCTION",
+            "II. HELPFUL HINTS",
+            "III. UNITS",
+            "IV. SOME COMMON MISTAKES",
+            "ACKNOWLEDGMENT",
+            "REFERENCES",
+        ]:
+            self.assertIn(
+                heading, page_lines,
+                f"section heading {heading!r} is not on its own line — "
+                f"first 3 lines containing it: "
+                f"{[l for l in page_lines if heading in l][:3]}",
+            )
+
+    def test_italic_subheadings_have_their_own_line(self):
+        """IEEE italic sub-section heads (``A. Full-Sized Camera-Ready
+        (CR) Copy``, ``A. Figures and Tables``, ``B. References``, …)
+        are rendered at body size in italic — neither size nor bold
+        signals distinguished them from body before. Each must now sit
+        on its own line."""
+        page_lines: list[str] = []
+        for p in self.out_doc:
+            for ln in p.get_text().splitlines():
+                page_lines.append(ln.strip())
+        for sub in [
+            "A. Full-Sized Camera-Ready (CR) Copy",
+            "A. Figures and Tables",
+            "B. References",
+            "C. Abbreviations and Acronyms",
+            "D. Equations",
+        ]:
+            self.assertIn(
+                sub, page_lines,
+                f"italic sub-heading {sub!r} not on its own line",
+            )
+
+    def test_references_each_item_on_own_line(self):
+        """Each numbered reference (``[1] ...``, ``[2] ...``, ...) must
+        start a new line in the reflowed output. Before, the block
+        grouper merged them all into one paragraph because they share
+        size and have tight vertical gaps."""
+        page_lines: list[str] = []
+        for p in self.out_doc:
+            for ln in p.get_text().splitlines():
+                page_lines.append(ln.strip())
+        # Find every line that starts a reference item.
+        starts = [ln for ln in page_lines if re.match(r"^\[\d+\]\s", ln)]
+        # All 7 references in the fixture must start their own line.
+        for i in range(1, 8):
+            self.assertTrue(
+                any(ln.startswith(f"[{i}] ") for ln in starts),
+                f"reference [{i}] does not begin its own line",
+            )
 
     def test_section_text_present(self):
         """Sanity: every major IEEE section heading text appears in the

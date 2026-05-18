@@ -336,7 +336,6 @@ def layout(
         if it.kind == "heading":
             # Detect title vs section heading vs run-in subheading by
             # comparing the source font size to the inferred body size.
-            font = "times-bold"
             if it.size >= body + 2.5:
                 size = body * cfg.heading_scale_h1
                 space_above = cfg.heading_space_above
@@ -346,12 +345,23 @@ def layout(
                 space_above = cfg.heading_space_above
                 level = 2
             else:
-                # Body-size run-in subheading (LaTeX \paragraph{...}). Keep
-                # the body size to preserve cadence; use a smaller lead so
-                # it reads as a paragraph label, not a new section break.
+                # Body-size run-in subheading (LaTeX \paragraph{...} or
+                # IEEE-style ``A. Full-Sized Camera-Ready (CR) Copy``).
+                # Keep the body size to preserve cadence; use a smaller
+                # lead so it reads as a paragraph label, not a new
+                # section break.
                 size = body
                 space_above = cfg.para_space
                 level = 3
+            # Level 3 headings keep their italic flag — IEEE-style
+            # sub-section heads render as italic, not bold. Level 1/2
+            # always render as bold; bold-italic when both flags set.
+            if level == 3 and it.italic and not it.bold:
+                font = "times-italic"
+            elif it.italic and it.bold:
+                font = "times-bolditalic"
+            else:
+                font = "times-bold"
             pb.add_space(space_above)
             # Ensure room for at least one heading line before recording the
             # anchor so the anchor page/y reflects any page-break that occurs.
