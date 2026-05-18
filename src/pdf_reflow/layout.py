@@ -15,7 +15,7 @@ from typing import List, Optional, Tuple
 
 import fitz
 
-from .analyze import FlowItem
+from .analyze import FlowItem, _parse_toc_entry
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +291,71 @@ class _PageBuilder:
         self.current.ops.append(DrawText(x=cx, y=baseline, text=text, font=font, size=size))
         self.y += line_h
 
+    def emit_toc_entry(
+        self,
+        title: str,
+        page: str,
+        font: str,
+        size: float,
+        indent: float = 0.0,
+    ) -> None:
+        """Render a single table-of-contents entry: ``title .... page``.
+
+        The title is left-aligned (optionally indented for nested entries),
+        the page number is right-aligned at the column edge, and a dot
+        leader fills the gap. If the title doesn't fit on one line it is
+        wrapped onto subsequent lines and the page number / leader sit on
+        the last line."""
+        cfg = self.cfg
+        left = cfg.content_left + indent
+        right = cfg.content_right
+        avail = right - left
+        if avail <= 0:
+            avail = cfg.content_width
+            left = cfg.content_left
+
+        space_w = FontMetrics.width(font, " ", size)
+        dot_w = FontMetrics.width(font, ".", size)
+        page_w = FontMetrics.width(font, page, size)
+
+        # How wide a title can be on one line before we need the leader to
+        # disappear / wrap. Reserve room for the page number plus a single
+        # space, and at least 3 dots so the leader stays recognizable.
+        min_leader_w = 3 * dot_w + 2 * space_w
+        title_budget = avail - page_w - min_leader_w
+
+        title_lines = _wrap_paragraph(title, font, size, max(title_budget, avail * 0.4))
+        if not title_lines:
+            return
+
+        line_h = size * cfg.line_height_mult
+        total_h = line_h * len(title_lines)
+        if total_h > self.remaining():
+            self._open_page()
+
+        for i, line_text in enumerate(title_lines):
+            if line_h > self.remaining():
+                self._open_page()
+            baseline = self.y + size
+            self.current.ops.append(DrawText(
+                x=left, y=baseline, text=line_text, font=font, size=size,
+            ))
+            if i == len(title_lines) - 1:
+                title_w = FontMetrics.width(font, line_text, size)
+                gap = avail - title_w - page_w - 2 * space_w
+                if gap >= dot_w:
+                    n_dots = max(1, int(gap / dot_w))
+                    dots = "." * n_dots
+                    dots_x = left + title_w + space_w
+                    self.current.ops.append(DrawText(
+                        x=dots_x, y=baseline, text=dots, font=font, size=size,
+                    ))
+                self.current.ops.append(DrawText(
+                    x=right - page_w, y=baseline, text=page,
+                    font=font, size=size,
+                ))
+            self.y += line_h
+
     def emit_image(self, src_page: int, src_rect, w: float, h: float, center: bool = True) -> None:
         if h > self.cfg.content_height * self.cfg.figure_max_height_frac:
             # Cap the figure's height.
@@ -377,6 +442,23 @@ def layout(
         elif it.kind == "body":
             font = "times-italic" if it.italic else ("times-bold" if it.bold else "times-roman")
             emit_paragraph(it.text, font, body, lead_space=cfg.para_space, align=it.align)
+        elif it.kind == "toc":
+            parsed = _parse_toc_entry(it.text)
+            if parsed is None:
+                emit_paragraph(it.text, "times-roman", body, lead_space=cfg.para_space,
+                               align=it.align)
+                continue
+            title, page_label = parsed
+            # Scale source-pt indent to a milder mobile indent, capped so
+            # deeply nested entries still leave room for the title text.
+            scaled_indent = min(it.indent * 0.5, cw * 0.3)
+            pb.emit_toc_entry(
+                title=title,
+                page=page_label,
+                font="times-roman",
+                size=body,
+                indent=scaled_indent,
+            )
         elif it.kind == "caption":
             font = "times-italic" if it.italic else "times-roman"
             emit_paragraph(it.text, font, cfg.caption_size, lead_space=cfg.para_space, align=it.align)

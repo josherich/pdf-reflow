@@ -87,6 +87,7 @@ class FlowItem:
     monospace: bool = False             # for 'code' blocks
     code_lines: List[str] = field(default_factory=list)
     align: str = "left"                 # 'left' | 'center' — preserves centered headings/captions
+    indent: float = 0.0                 # for 'toc': source-pt indent of the entry relative to the block column
 
 
 # Font-name prefixes that identify math-only glyph fonts. LaTeX's
@@ -215,6 +216,35 @@ _LIST_ITEM_RE = re.compile(r"^\s*\[\d+\]\s")
 
 def _line_starts_list_item(line: "Line") -> bool:
     return bool(_LIST_ITEM_RE.match(line.text))
+
+
+# Table-of-contents entry: any line that ends with a dot leader (".....")
+# followed by a page reference (arabic or roman numeral). Each TOC entry
+# must occupy its own block so the page numbers don't get wrapped into
+# the next entry's title.
+_TOC_LINE_RE = re.compile(
+    r"\.\s*(?:\.\s*){2,}\s*(?:\d+|[ivxlcdmIVXLCDM]+)\s*$"
+)
+
+
+def _line_is_toc_entry(line: "Line") -> bool:
+    return bool(_TOC_LINE_RE.search(line.text))
+
+
+def _parse_toc_entry(text: str) -> Optional[Tuple[str, str]]:
+    """Split a TOC line ``"Chapter 1 ........ 12"`` into (title, page).
+    Returns None if the line doesn't look like a TOC entry."""
+    m = re.match(
+        r"^\s*(.+?)\s*\.\s*(?:\.\s*){2,}\s*(\d+|[ivxlcdmIVXLCDM]+)\s*$",
+        text,
+    )
+    if not m:
+        return None
+    title = m.group(1).strip()
+    page = m.group(2).strip()
+    if not title:
+        return None
+    return title, page
 
 
 def _line_italic_score(line: "Line") -> float:
@@ -413,6 +443,11 @@ def _group_blocks(lines: List[Line], page_index: int, body_size: float = 10.0) -
         cur_minor_head = _line_is_minor_heading(ln, body_size)
         # Numbered reference list items always start a new block.
         cur_list_item = _line_starts_list_item(ln)
+        # Table-of-contents entries always start a new block — each entry
+        # (title + dot leader + page number) must stay on its own line so
+        # the page number doesn't get word-wrapped into the next entry.
+        prev_toc = _line_is_toc_entry(prev)
+        cur_toc = _line_is_toc_entry(ln)
         # First-line indent: when a line is meaningfully indented
         # compared to the block's column-left edge (the minimum x0 of
         # all lines already in the current block), it's the indented
@@ -438,6 +473,8 @@ def _group_blocks(lines: List[Line], page_index: int, body_size: float = 10.0) -
             and not cur_minor_head
             and not cur_list_item
             and not cur_para_indent
+            and not prev_toc
+            and not cur_toc
         ):
             current.append(ln)
         else:
@@ -589,6 +626,15 @@ def _classify_blocks(blocks: List[Block], body_size: float) -> None:
         math_score = _block_math_score(b)
         if math_score >= 0.35 or (math_score > 0 and len(t) <= 12 and _block_has_math_font(b)):
             b.kind = "equation"
+            continue
+        if (
+            len(b.lines) == 1
+            and _line_is_toc_entry(b.lines[0])
+        ):
+            # Single-line block ending in dot-leader + page number: a
+            # table-of-contents entry. Rendered specially in layout (no
+            # word-wrap; right-aligned page number).
+            b.kind = "toc"
             continue
         if b.size >= body_size + 1.0 and b.bold:
             b.kind = "heading"
@@ -844,7 +890,7 @@ def _figure_regions_in_extent(
             continue
         bw = b.bbox[2] - b.bbox[0]
         is_narrow_fragment = bw < 40.0 and len(b.text.strip()) <= 6
-        if b.kind in ("body", "heading") and not (b.kind == "body" and is_narrow_fragment):
+        if b.kind in ("body", "heading", "toc") and not (b.kind == "body" and is_narrow_fragment):
             continue
         by0, by1 = b.bbox[1], b.bbox[3]
         for band in bands:
@@ -923,7 +969,7 @@ def _figure_regions(page: PageContent, blocks: List[Block], body_size: float) ->
             continue
         bw = b.bbox[2] - b.bbox[0]
         is_narrow_fragment = bw < 40.0 and len(b.text.strip()) <= 6
-        if b.kind in ("body", "heading") and not (b.kind == "body" and is_narrow_fragment):
+        if b.kind in ("body", "heading", "toc") and not (b.kind == "body" and is_narrow_fragment):
             continue
         by0, by1 = b.bbox[1], b.bbox[3]
         for band in bands:
@@ -1187,6 +1233,8 @@ def analyze_page(page: PageContent, body_size: float) -> List[FlowItem]:
                 width = b.bbox[2] - b.bbox[0]
                 if b.kind == "body" and width > page.width * 0.55 and len(b.text) > 80:
                     in_fig = False
+                elif b.kind == "toc":
+                    in_fig = False
                 else:
                     in_fig = True
                 break
@@ -1198,6 +1246,10 @@ def analyze_page(page: PageContent, body_size: float) -> List[FlowItem]:
 
     # Add text blocks not inside figures.
     page_margin = 16.0
+    toc_min_x0 = min(
+        (b.bbox[0] for b in blocks if b.kind == "toc"),
+        default=0.0,
+    )
     for b, inside in zip(blocks, inside_band):
         if inside:
             continue
@@ -1245,6 +1297,7 @@ def analyze_page(page: PageContent, body_size: float) -> List[FlowItem]:
             )
             items_with_y.append((b.column, b.bbox[1], item))
             continue
+        indent = max(0.0, b.bbox[0] - toc_min_x0) if b.kind == "toc" else 0.0
         item = FlowItem(
             kind=b.kind,
             page_index=page.index,
@@ -1254,6 +1307,7 @@ def analyze_page(page: PageContent, body_size: float) -> List[FlowItem]:
             bold=b.bold,
             italic=b.italic,
             align=b.align,
+            indent=indent,
         )
         items_with_y.append((b.column, b.bbox[1], item))
 
