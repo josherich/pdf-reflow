@@ -100,6 +100,11 @@ function b64encode(bytes) {
 window.reflowBase64 = async function (b64, cfg) {
   const pyodide = await ensurePyodide();
   pyodide.FS.writeFile("/in.pdf", b64decode(b64));
+  const pageStart = Number.isFinite(cfg.page_start) ? cfg.page_start : 0;
+  const pageEndLiteral =
+    cfg.page_end == null || !Number.isFinite(cfg.page_end)
+      ? "None"
+      : String(cfg.page_end);
   pyodide.runPython(`
 from pdf_reflow import reflow_pdf, ReflowConfig
 reflow_pdf(
@@ -111,6 +116,8 @@ reflow_pdf(
         body_size=${cfg.body_size},
         figure_dpi=${cfg.figure_dpi},
         workers=1,
+        page_start=${pageStart},
+        page_end=${pageEndLiteral},
     ),
 )
 `);
