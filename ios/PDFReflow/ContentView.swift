@@ -232,15 +232,15 @@ struct ContentView: View {
         reflowProgressTimer?.invalidate()
         reflowProgress = 0
         let started = Date()
-        // Asymptote at ~0.95 so the bar never reaches 100% before the actual
+        // Asymptote at ~0.97 so the bar never reaches 100% before the actual
         // result is back — it then snaps to 1.0 in `stopProgressAnimation`.
-        let ceiling = 0.95
+        let ceiling = 0.97
         let duration = max(estimatedDuration, 1.0)
         reflowProgressTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
             Task { @MainActor in
                 let elapsed = Date().timeIntervalSince(started)
                 let fraction = elapsed / duration
-                reflowProgress = ceiling * (1.0 - exp(-1.6 * fraction))
+                reflowProgress = ceiling * (1.0 - exp(-3.0 * fraction))
             }
         }
     }

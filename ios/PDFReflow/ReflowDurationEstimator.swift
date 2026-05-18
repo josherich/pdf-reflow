@@ -18,8 +18,8 @@ final class ReflowDurationEstimator {
     private let samplesKey = "ReflowDuration.samples"
     private let coldStartKey = "ReflowDuration.coldStartMs"
 
-    private let defaultMsPerPage: Double = 1200
-    private let defaultColdStartMs: Double = 10_000
+    private let defaultMsPerPage: Double = 400
+    private let defaultColdStartMs: Double = 3_000
 
     private var msPerPage: Double {
         let v = UserDefaults.standard.double(forKey: msPerPageKey)
@@ -42,12 +42,17 @@ final class ReflowDurationEstimator {
         let ms = duration * 1000.0
         if wasColdStart {
             let observedOverhead = max(0, ms - msPerPage * Double(pages))
-            let blended = 0.5 * coldStartMs + 0.5 * observedOverhead
+            // Replace the default on the first cold sample; blend afterward.
+            let previous = UserDefaults.standard.double(forKey: coldStartKey)
+            let blended = previous > 0
+                ? 0.5 * previous + 0.5 * observedOverhead
+                : observedOverhead
             UserDefaults.standard.set(blended, forKey: coldStartKey)
         } else {
             let observed = ms / Double(pages)
             let samples = UserDefaults.standard.integer(forKey: samplesKey)
-            let weight = max(0.1, min(0.3, 1.0 / Double(samples + 1)))
+            // First sample replaces the default outright; later samples blend in.
+            let weight = samples == 0 ? 1.0 : max(0.2, min(0.5, 1.0 / Double(samples + 1)))
             let blended = (1 - weight) * msPerPage + weight * observed
             UserDefaults.standard.set(blended, forKey: msPerPageKey)
             UserDefaults.standard.set(samples + 1, forKey: samplesKey)
