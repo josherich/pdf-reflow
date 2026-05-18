@@ -10,6 +10,8 @@ struct ContentView: View {
     @State private var reflowedDocument: PDFDocument?
     @State private var showingReflow = false
     @State private var reflowing = false
+    @State private var reflowProgress: Double = 0
+    @State private var reflowProgressTimer: Timer?
     @State private var error: String?
     @State private var displayName = "PDF Reflow"
     @State private var settingsPresented = false
@@ -39,7 +41,7 @@ struct ContentView: View {
                 }
 
                 if reflowing {
-                    ReflowingOverlay()
+                    ReflowingOverlay(progress: reflowProgress)
                 }
             }
             .navigationTitle(navigationTitle)
@@ -144,7 +146,7 @@ struct ContentView: View {
         reflowedDocument = nil
         showingReflow = false
         displayName = url.deletingPathExtension().lastPathComponent
-        recents.record(url: url, size: Int64(data.count))
+        recents.record(url: url, size: Int64(data.count), signature: originalSignature)
     }
 
     private func closeDocument() {
@@ -186,8 +188,20 @@ struct ContentView: View {
             return
         }
 
+        let pageCount = originalDocument?.pageCount ?? 1
+        let wasColdStart = !engine.isReady
+        let estimated = ReflowDurationEstimator.shared.estimate(
+            pageCount: pageCount,
+            includeColdStart: wasColdStart
+        )
+
         reflowing = true
-        defer { reflowing = false }
+        startProgressAnimation(estimatedDuration: estimated)
+        let startedAt = Date()
+        defer {
+            reflowing = false
+            stopProgressAnimation()
+        }
 
         let preset = ReflowPreset(
             pageWidth: ReflowPreset.iphone17.pageWidth,
@@ -198,6 +212,11 @@ struct ContentView: View {
 
         do {
             let reflowed = try await engine.reflow(pdfData: data, preset: preset)
+            ReflowDurationEstimator.shared.record(
+                pageCount: pageCount,
+                duration: Date().timeIntervalSince(startedAt),
+                wasColdStart: wasColdStart
+            )
             ReflowCache.shared.write(key: cacheKey, data: reflowed)
             guard let doc = PDFDocument(data: reflowed) else {
                 throw ReflowError.invalidResponse
@@ -207,6 +226,29 @@ struct ContentView: View {
         } catch {
             self.error = "Reflow failed: \(error.localizedDescription)"
         }
+    }
+
+    private func startProgressAnimation(estimatedDuration: TimeInterval) {
+        reflowProgressTimer?.invalidate()
+        reflowProgress = 0
+        let started = Date()
+        // Asymptote at ~0.95 so the bar never reaches 100% before the actual
+        // result is back — it then snaps to 1.0 in `stopProgressAnimation`.
+        let ceiling = 0.95
+        let duration = max(estimatedDuration, 1.0)
+        reflowProgressTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
+            Task { @MainActor in
+                let elapsed = Date().timeIntervalSince(started)
+                let fraction = elapsed / duration
+                reflowProgress = ceiling * (1.0 - exp(-1.6 * fraction))
+            }
+        }
+    }
+
+    private func stopProgressAnimation() {
+        reflowProgressTimer?.invalidate()
+        reflowProgressTimer = nil
+        reflowProgress = 1.0
     }
 }
 
@@ -247,6 +289,9 @@ private struct RecentsHomeView: View {
                             .buttonStyle(.plain)
                             .swipeActions {
                                 Button(role: .destructive) {
+                                    if let sig = item.signature {
+                                        ReflowCache.shared.removeAll(signature: sig)
+                                    }
                                     recents.remove(item)
                                 } label: {
                                     Label("Remove", systemImage: "trash")
@@ -342,16 +387,18 @@ private struct BottomOpenBar: View {
 }
 
 private struct ReflowingOverlay: View {
+    let progress: Double
+
     var body: some View {
+        let clamped = max(0, min(progress, 1))
         VStack(spacing: 12) {
-            ProgressView()
-            Text("Reflowing…")
+            ProgressView(value: clamped)
+                .progressViewStyle(.linear)
+                .frame(width: 220)
+                .animation(.easeOut(duration: 0.15), value: clamped)
+            Text("Reflowing… \(Int(clamped * 100))%")
                 .font(.callout.weight(.medium))
-            Text("First run downloads the WASM Python runtime; later runs are quick.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 260)
+                .monospacedDigit()
         }
         .padding(20)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))

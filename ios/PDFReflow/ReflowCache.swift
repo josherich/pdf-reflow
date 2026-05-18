@@ -77,6 +77,16 @@ final class ReflowCache {
         return Stats(fileCount: count, totalBytes: bytes)
     }
 
+    /// Remove every cached variant (any font size / PPI) for a given PDF signature.
+    func removeAll(signature: String) {
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return }
+        let prefix = "\(signature)-"
+        for item in items where item.lastPathComponent.hasPrefix(prefix) {
+            try? fm.removeItem(at: item)
+        }
+    }
+
     func clear() {
         let fm = FileManager.default
         guard let items = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return }
