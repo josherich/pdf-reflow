@@ -8,6 +8,13 @@ struct PDFViewer: UIViewRepresentable {
     /// refreshes on the next ``updateUIView`` so the new pages become
     /// visible without losing the user's scroll position.
     var revision: Int = 0
+    /// Set by the owner to request a jump to a specific page index in
+    /// the current ``document`` (e.g. from the table-of-contents modal).
+    /// The view consumes the value by setting it back to `nil`.
+    @Binding var pendingPageIndex: Int?
+    /// Updated by the view whenever the visible page changes, so callers
+    /// can drive UI like the TOC's "current section" highlight.
+    var onPageChange: ((Int) -> Void)? = nil
 
     func makeUIView(context: Context) -> PDFView {
         let view = PDFView()
@@ -20,6 +27,7 @@ struct PDFViewer: UIViewRepresentable {
         view.backgroundColor = .systemBackground
         view.document = document
         context.coordinator.appliedRevision = revision
+        context.coordinator.attach(to: view, owner: self)
         return view
     }
 
@@ -27,15 +35,37 @@ struct PDFViewer: UIViewRepresentable {
 
     final class Coordinator {
         var appliedRevision: Int = -1
+        var onPageChange: ((Int) -> Void)?
+        private weak var view: PDFView?
+        private var observer: NSObjectProtocol?
+
+        func attach(to view: PDFView, owner: PDFViewer) {
+            self.view = view
+            self.onPageChange = owner.onPageChange
+            observer = NotificationCenter.default.addObserver(
+                forName: .PDFViewPageChanged,
+                object: view,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self,
+                      let v = self.view,
+                      let page = v.currentPage,
+                      let idx = v.document?.index(for: page),
+                      idx >= 0
+                else { return }
+                self.onPageChange?(idx)
+            }
+        }
+
+        deinit {
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+        }
     }
 
     func updateUIView(_ view: PDFView, context: Context) {
+        context.coordinator.onPageChange = onPageChange
         let documentChanged = view.document !== document
         let revisionChanged = context.coordinator.appliedRevision != revision
-
-        if !documentChanged && !revisionChanged {
-            return
-        }
 
         if documentChanged {
             // Preserve the current reading position when the underlying
@@ -55,13 +85,27 @@ struct PDFViewer: UIViewRepresentable {
                 view.scaleFactor = view.scaleFactorForSizeToFit
                 view.goToFirstPage(nil)
             }
-        } else {
+        } else if revisionChanged {
             // In-place mutation. PDFView observes PDFKit's insert/remove
             // notifications, so layout updates on its own — we just nudge
             // it in case the document grew while off-screen.
             view.layoutDocumentView()
         }
 
-        context.coordinator.appliedRevision = revision
+        if documentChanged || revisionChanged {
+            context.coordinator.appliedRevision = revision
+        }
+
+        if let idx = pendingPageIndex {
+            if idx >= 0,
+               idx < document.pageCount,
+               let page = document.page(at: idx) {
+                view.go(to: page)
+            }
+            // Consume the request so it doesn't replay on the next update.
+            DispatchQueue.main.async {
+                self.pendingPageIndex = nil
+            }
+        }
     }
 }

@@ -22,6 +22,9 @@ struct ContentView: View {
     @State private var error: String?
     @State private var displayName = "PDF Reflow"
     @State private var settingsPresented = false
+    @State private var tocPresented = false
+    @State private var pendingPageIndex: Int?
+    @State private var currentPageIndex: Int = 0
 
     @StateObject private var engine = ReflowEngine()
     @StateObject private var recents = RecentPDFsStore()
@@ -37,7 +40,9 @@ struct ContentView: View {
                 if let doc = displayed {
                     PDFViewer(
                         document: doc,
-                        revision: showingReflow ? reflowedRevision : 0
+                        revision: showingReflow ? reflowedRevision : 0,
+                        pendingPageIndex: $pendingPageIndex,
+                        onPageChange: { currentPageIndex = $0 }
                     )
                         .ignoresSafeArea(edges: .bottom)
                         .safeAreaInset(edge: .bottom) {
@@ -74,6 +79,17 @@ struct ContentView: View {
             )
             .sheet(isPresented: $settingsPresented) {
                 SettingsView(settings: settings)
+            }
+            .sheet(isPresented: $tocPresented) {
+                if let doc = displayed {
+                    TableOfContentsView(
+                        document: doc,
+                        currentPageIndex: currentPageIndex,
+                        onSelect: { idx in
+                            pendingPageIndex = idx
+                        }
+                    )
+                }
             }
             .alert("Error", isPresented: Binding(
                 get: { error != nil },
@@ -122,6 +138,19 @@ struct ContentView: View {
                 }
                 .disabled(originalDocument == nil || reflowing)
                 .accessibilityLabel(showingReflow ? "Show original" : "Reflow for mobile")
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button {
+                        tocPresented = true
+                    } label: {
+                        Label("Table of Contents", systemImage: "list.bullet.indent")
+                    }
+                    .disabled(displayed == nil)
+                } label: {
+                    Label("More", systemImage: "ellipsis.circle")
+                }
+                .accessibilityLabel("More options")
             }
         }
     }
