@@ -274,13 +274,20 @@ class _PageBuilder:
     def add_space(self, dy: float) -> None:
         self.y += dy
 
-    def emit_text_line(self, text: str, font: str, size: float, x: Optional[float] = None) -> None:
+    def emit_text_line(self, text: str, font: str, size: float, x: Optional[float] = None,
+                       align: str = "left") -> None:
         line_h = size * self.cfg.line_height_mult
         # Reserve descender room: baseline is at y + size.
         if line_h > self.remaining():
             self._open_page()
         baseline = self.y + size
-        cx = self.cfg.content_left if x is None else x
+        if x is not None:
+            cx = x
+        elif align == "center":
+            w = FontMetrics.width(font, text, size)
+            cx = self.cfg.content_left + max(0.0, (self.cfg.content_width - w) / 2)
+        else:
+            cx = self.cfg.content_left
         self.current.ops.append(DrawText(x=cx, y=baseline, text=text, font=font, size=size))
         self.y += line_h
 
@@ -315,14 +322,15 @@ def layout(
     cw = cfg.content_width
     anchors: List[HeadingAnchor] = []
 
-    def emit_paragraph(text: str, font: str, size: float, lead_space: float = 0.0):
+    def emit_paragraph(text: str, font: str, size: float, lead_space: float = 0.0,
+                       align: str = "left"):
         text = text.strip()
         if not text:
             return
         if lead_space:
             pb.add_space(lead_space)
         for line in _wrap_paragraph(text, font, size, cw):
-            pb.emit_text_line(line, font, size)
+            pb.emit_text_line(line, font, size, align=align)
 
     for it in items:
         if it.kind == "heading":
@@ -354,14 +362,14 @@ def layout(
                 out_page=len(pb.pages) - 1,
                 y=pb.y,
             ))
-            emit_paragraph(it.text, font, size)
+            emit_paragraph(it.text, font, size, align=it.align)
             pb.add_space(cfg.heading_space_below)
         elif it.kind == "body":
             font = "times-italic" if it.italic else ("times-bold" if it.bold else "times-roman")
-            emit_paragraph(it.text, font, body, lead_space=cfg.para_space)
+            emit_paragraph(it.text, font, body, lead_space=cfg.para_space, align=it.align)
         elif it.kind == "caption":
             font = "times-italic" if it.italic else "times-roman"
-            emit_paragraph(it.text, font, cfg.caption_size, lead_space=cfg.para_space)
+            emit_paragraph(it.text, font, cfg.caption_size, lead_space=cfg.para_space, align=it.align)
         elif it.kind == "code":
             # Pre-formatted: each source line drawn at code_size. If a line is
             # wider than the column, scale the code_size down for that block

@@ -99,22 +99,30 @@ class ReflowCorrectnessTests(unittest.TestCase):
             self.assertAlmostEqual(page.rect.height, 600.0, places=1)
 
     def test_pages_are_single_column(self):
-        # In a single-column layout, the horizontal span of text on each page
-        # should be narrow (less than 80% of the page width), and there should
-        # only be one "column cluster" of text x-positions.
+        # In a single-column layout, every left-aligned line should begin at
+        # roughly the same x. Centered lines (title, author block, centered
+        # captions) have varying x0 by design — exclude them from the
+        # comparison by checking that the line's right margin to page edge
+        # is much smaller than its left margin (left-aligned) rather than
+        # roughly symmetric (centered).
         for i, page in enumerate(self.out_doc):
-            spans = []
+            page_w = page.rect.width
+            x0s = []
             for block in page.get_text("dict").get("blocks", []):
                 if block.get("type") != 0:
                     continue
                 for line in block.get("lines", []):
-                    if line.get("spans"):
-                        spans.append(line["bbox"])
-            if not spans:
+                    if not line.get("spans"):
+                        continue
+                    bbox = line["bbox"]
+                    left_gap = bbox[0]
+                    right_gap = page_w - bbox[2]
+                    # Skip centered lines: roughly symmetric margins.
+                    if abs(left_gap - right_gap) < 10.0:
+                        continue
+                    x0s.append(bbox[0])
+            if not x0s:
                 continue
-            x0s = [b[0] for b in spans]
-            # All lines should begin within a narrow range — at most ~10pt
-            # variation around the left margin (allows for italic kerning, etc).
             left = min(x0s)
             self.assertLessEqual(
                 max(x0s) - left, 25.0,
