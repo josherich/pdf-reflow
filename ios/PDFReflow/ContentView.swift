@@ -8,6 +8,7 @@ struct ContentView: View {
     @State private var originalData: Data?
     @State private var originalSignature: String?
     @State private var reflowedDocument: PDFDocument?
+    @State private var reflowedRevision = 0
     @State private var reflowedIsPartial = false
     @State private var showingReflow = false
     @State private var reflowing = false
@@ -15,7 +16,6 @@ struct ContentView: View {
     @State private var reflowProgressTimer: Timer?
     @State private var backgroundReflowing = false
     @State private var backgroundProgress: Double = 0
-    @State private var backgroundProgressTimer: Timer?
     @State private var backgroundTask: Task<Void, Never>?
     @State private var previewPageCount = 0
     @State private var totalPageCount = 0
@@ -35,7 +35,10 @@ struct ContentView: View {
         NavigationStack {
             ZStack {
                 if let doc = displayed {
-                    PDFViewer(document: doc)
+                    PDFViewer(
+                        document: doc,
+                        revision: showingReflow ? reflowedRevision : 0
+                    )
                         .ignoresSafeArea(edges: .bottom)
                         .safeAreaInset(edge: .bottom) {
                             if showingReflow && backgroundReflowing {
@@ -156,11 +159,12 @@ struct ContentView: View {
             error = "Could not read \(url.lastPathComponent)."
             return
         }
-        cancelBackgroundReflow()
+        cancelStreamingReflow()
         originalDocument = doc
         originalData = data
         originalSignature = ReflowCache.shared.signature(for: data)
         reflowedDocument = nil
+        reflowedRevision = 0
         reflowedIsPartial = false
         showingReflow = false
         previewPageCount = 0
@@ -170,11 +174,12 @@ struct ContentView: View {
     }
 
     private func closeDocument() {
-        cancelBackgroundReflow()
+        cancelStreamingReflow()
         originalDocument = nil
         originalData = nil
         originalSignature = nil
         reflowedDocument = nil
+        reflowedRevision = 0
         reflowedIsPartial = false
         showingReflow = false
         previewPageCount = 0
@@ -182,16 +187,21 @@ struct ContentView: View {
         displayName = "PDF Reflow"
     }
 
-    /// Number of pages to render up-front when the user taps Reflow. Returns
-    /// nil for tiny documents where the full reflow is fast enough that
-    /// the preview hop just adds latency.
-    private func previewCount(for totalPages: Int) -> Int? {
-        switch totalPages {
-        case ...5: return nil
-        case 6...10: return 3
-        case 11...20: return 5
-        default: return 10
+    /// Chunk plan for streaming reflow. The first chunk is intentionally
+    /// small (low time-to-first-page); follow-up chunks are larger so the
+    /// per-chunk Pyodide round-trip overhead amortises. Tiny documents
+    /// reflow in one shot — the chunk hop would just add latency.
+    private func chunkPlan(for totalPages: Int) -> [Int] {
+        if totalPages <= 5 { return [totalPages] }
+        var sizes: [Int] = [min(3, totalPages)]
+        var remaining = totalPages - sizes[0]
+        let followUp = totalPages <= 20 ? 5 : 10
+        while remaining > 0 {
+            let take = min(followUp, remaining)
+            sizes.append(take)
+            remaining -= take
         }
+        return sizes
     }
 
     private func toggleReflow() async {
@@ -202,8 +212,8 @@ struct ContentView: View {
             return
         }
         if reflowedDocument != nil {
-            // Even if we only have the partial preview so far, just show
-            // what we have — the background full reflow keeps running.
+            // Even if streaming hasn't finished yet, just show what we
+            // have — more pages will append as they arrive.
             showingReflow = true
             return
         }
@@ -222,6 +232,7 @@ struct ContentView: View {
         if let cached = ReflowCache.shared.read(key: cacheKey),
            let doc = PDFDocument(data: cached) {
             reflowedDocument = doc
+            reflowedRevision &+= 1
             reflowedIsPartial = false
             showingReflow = true
             return
@@ -236,21 +247,22 @@ struct ContentView: View {
         )
 
         totalPageCount = pageCount
-        previewPageCount = previewCount(for: pageCount) ?? pageCount
+        let plan = chunkPlan(for: pageCount)
+        previewPageCount = plan.first ?? pageCount
 
-        if let preview = previewCount(for: pageCount), preview < pageCount {
-            await runPreviewThenBackground(
-                data: data,
-                preset: preset,
-                cacheKey: cacheKey,
-                previewCount: preview,
-                totalPages: pageCount
-            )
-        } else {
+        if plan.count == 1 {
             await runFullBlocking(
                 data: data,
                 preset: preset,
                 cacheKey: cacheKey,
+                pageCount: pageCount
+            )
+        } else {
+            startStreamingReflow(
+                data: data,
+                preset: preset,
+                cacheKey: cacheKey,
+                plan: plan,
                 pageCount: pageCount
             )
         }
@@ -288,6 +300,7 @@ struct ContentView: View {
                 throw ReflowError.invalidResponse
             }
             reflowedDocument = doc
+            reflowedRevision &+= 1
             reflowedIsPartial = false
             showingReflow = true
         } catch {
@@ -295,108 +308,218 @@ struct ContentView: View {
         }
     }
 
-    private func runPreviewThenBackground(
+    /// Stream-reflow: reflow the source in N page-range chunks, growing
+    /// the displayed document as each chunk arrives. The first chunk
+    /// flips the UI to "showing reflow" and dismisses the blocking
+    /// overlay; subsequent chunks append pages and update the bottom
+    /// progress bar. When the last chunk lands we write the merged PDF
+    /// (with offset-corrected outlines) to the cache so subsequent opens
+    /// are instant.
+    private func startStreamingReflow(
         data: Data,
         preset: ReflowPreset,
         cacheKey: String,
-        previewCount: Int,
-        totalPages: Int
-    ) async {
+        plan: [Int],
+        pageCount: Int
+    ) {
+        backgroundTask?.cancel()
         let wasColdStart = !engine.isReady
-        let previewEstimated = ReflowDurationEstimator.shared.estimate(
-            pageCount: previewCount,
+        let firstChunkSize = plan.first ?? pageCount
+        let firstEstimated = ReflowDurationEstimator.shared.estimate(
+            pageCount: firstChunkSize,
             includeColdStart: wasColdStart
         )
 
         reflowing = true
-        startProgressAnimation(estimatedDuration: previewEstimated)
-        let previewStartedAt = Date()
+        startProgressAnimation(estimatedDuration: firstEstimated)
 
-        do {
-            let preview = try await engine.reflow(
-                pdfData: data,
-                preset: preset,
-                pageRange: 0..<previewCount
-            )
-            ReflowDurationEstimator.shared.record(
-                pageCount: previewCount,
-                duration: Date().timeIntervalSince(previewStartedAt),
-                wasColdStart: wasColdStart
-            )
-            guard let previewDoc = PDFDocument(data: preview) else {
-                throw ReflowError.invalidResponse
-            }
-            reflowedDocument = previewDoc
-            reflowedIsPartial = true
-            showingReflow = true
-        } catch {
-            self.error = "Reflow failed: \(error.localizedDescription)"
-            reflowing = false
-            stopProgressAnimation()
-            return
-        }
-
-        reflowing = false
-        stopProgressAnimation()
-
-        startBackgroundFullReflow(
-            data: data,
-            preset: preset,
-            cacheKey: cacheKey,
-            totalPages: totalPages
-        )
-    }
-
-    private func startBackgroundFullReflow(
-        data: Data,
-        preset: ReflowPreset,
-        cacheKey: String,
-        totalPages: Int
-    ) {
-        backgroundTask?.cancel()
-        backgroundReflowing = true
-        let estimated = ReflowDurationEstimator.shared.estimate(
-            pageCount: totalPages,
-            includeColdStart: false
-        )
-        startBackgroundProgressAnimation(estimatedDuration: estimated)
+        let merged = PDFDocument()
+        let totalStarted = Date()
+        let firstStarted = Date()
 
         backgroundTask = Task { @MainActor in
-            let started = Date()
-            defer {
-                backgroundReflowing = false
-                stopBackgroundProgressAnimation()
-            }
-            do {
-                let full = try await engine.reflow(pdfData: data, preset: preset)
-                try Task.checkCancellation()
-                ReflowDurationEstimator.shared.record(
-                    pageCount: totalPages,
-                    duration: Date().timeIntervalSince(started),
-                    wasColdStart: false
-                )
-                ReflowCache.shared.write(key: cacheKey, data: full)
-                guard let doc = PDFDocument(data: full) else {
-                    throw ReflowError.invalidResponse
+            var rangeStart = 0
+            var isFirstChunk = true
+
+            for chunkSize in plan {
+                let rangeEnd = min(rangeStart + chunkSize, pageCount)
+                if Task.isCancelled { return }
+                let chunkData: Data
+                do {
+                    chunkData = try await engine.reflow(
+                        pdfData: data,
+                        preset: preset,
+                        pageRange: rangeStart..<rangeEnd
+                    )
+                } catch is CancellationError {
+                    return
+                } catch {
+                    if isFirstChunk {
+                        reflowing = false
+                        stopProgressAnimation()
+                    }
+                    backgroundReflowing = false
+                    self.error = "Reflow failed: \(error.localizedDescription)"
+                    return
                 }
-                // Only swap in if the user is still on the same source PDF.
-                // (closeDocument / loadPDF cancel us, so reaching here means
-                // we're still relevant.)
-                reflowedDocument = doc
-                reflowedIsPartial = false
-            } catch is CancellationError {
-                // user moved on; drop the result.
-            } catch {
-                self.error = "Full reflow failed: \(error.localizedDescription)"
+                if Task.isCancelled { return }
+                guard let chunkDoc = PDFDocument(data: chunkData) else {
+                    if isFirstChunk {
+                        reflowing = false
+                        stopProgressAnimation()
+                    }
+                    backgroundReflowing = false
+                    self.error = "Reflow produced an unreadable PDF chunk."
+                    return
+                }
+
+                let base = merged.pageCount
+                // Snapshot the chunk's outline BEFORE we move its pages
+                // into `merged` — PDFKit's insert(_:at:) reparents pages,
+                // so any after-the-fact lookup against `chunkDoc` would
+                // return -1.
+                let outlineSnapshot = Self.snapshotOutline(of: chunkDoc)
+                for i in 0..<chunkDoc.pageCount {
+                    if let page = chunkDoc.page(at: i) {
+                        merged.insert(page, at: base + i)
+                    }
+                }
+                Self.applyOutlineSnapshot(
+                    outlineSnapshot, to: merged, pageOffset: base
+                )
+
+                if isFirstChunk {
+                    ReflowDurationEstimator.shared.record(
+                        pageCount: chunkSize,
+                        duration: Date().timeIntervalSince(firstStarted),
+                        wasColdStart: wasColdStart
+                    )
+                    reflowedDocument = merged
+                    reflowedRevision &+= 1
+                    reflowedIsPartial = rangeEnd < pageCount
+                    showingReflow = true
+                    reflowing = false
+                    stopProgressAnimation()
+                    if rangeEnd < pageCount {
+                        backgroundReflowing = true
+                        backgroundProgress = Double(rangeEnd) / Double(pageCount)
+                    }
+                    isFirstChunk = false
+                } else {
+                    reflowedRevision &+= 1
+                    backgroundProgress = Double(rangeEnd) / Double(pageCount)
+                }
+                rangeStart = rangeEnd
+            }
+
+            reflowedIsPartial = false
+            backgroundReflowing = false
+            backgroundProgress = 1.0
+
+            ReflowDurationEstimator.shared.record(
+                pageCount: pageCount,
+                duration: Date().timeIntervalSince(totalStarted),
+                wasColdStart: wasColdStart
+            )
+            if let blob = merged.dataRepresentation() {
+                ReflowCache.shared.write(key: cacheKey, data: blob)
             }
         }
     }
 
-    private func cancelBackgroundReflow() {
+    private func cancelStreamingReflow() {
         backgroundTask?.cancel()
         backgroundTask = nil
         backgroundReflowing = false
-        stopBackgroundProgressAnimation()
+        if reflowing {
+            reflowing = false
+            stopProgressAnimation()
+        }
+    }
+
+    /// A POD snapshot of one outline node: enough to rebuild the entry
+    /// against another document. We capture the source's page indices
+    /// up-front because `PDFDocument.insert(_:at:)` reparents pages and
+    /// a delayed `srcPage.document?.index(for:)` would return -1.
+    private struct OutlineSnapshot {
+        let label: String?
+        let pageIndex: Int?
+        let point: CGPoint
+        let children: [OutlineSnapshot]
+    }
+
+    private static func snapshotOutline(of doc: PDFDocument) -> [OutlineSnapshot] {
+        guard let root = doc.outlineRoot else { return [] }
+        return snapshotChildren(of: root, in: doc)
+    }
+
+    private static func snapshotChildren(
+        of node: PDFOutline, in doc: PDFDocument
+    ) -> [OutlineSnapshot] {
+        var out: [OutlineSnapshot] = []
+        for i in 0..<node.numberOfChildren {
+            guard let child = node.child(at: i) else { continue }
+            var pageIndex: Int? = nil
+            var point: CGPoint = .zero
+            if let dest = child.destination, let page = dest.page {
+                let idx = doc.index(for: page)
+                if idx >= 0 { pageIndex = idx }
+                point = dest.point
+            }
+            out.append(OutlineSnapshot(
+                label: child.label,
+                pageIndex: pageIndex,
+                point: point,
+                children: snapshotChildren(of: child, in: doc)
+            ))
+        }
+        return out
+    }
+
+    /// Splice an outline snapshot into ``destination`` at ``pageOffset``,
+    /// so chunk-local page indices (0, 1, …) map onto the right pages in
+    /// the merged document. Nodes whose source page didn't make it into
+    /// destination are dropped silently (their text content is already
+    /// present — the bookmark is the only thing lost).
+    private static func applyOutlineSnapshot(
+        _ snapshot: [OutlineSnapshot],
+        to destination: PDFDocument,
+        pageOffset: Int
+    ) {
+        guard !snapshot.isEmpty else { return }
+        let root = destination.outlineRoot ?? {
+            let r = PDFOutline()
+            destination.outlineRoot = r
+            return r
+        }()
+        for node in snapshot {
+            if let cloned = rebuildOutline(node, in: destination, pageOffset: pageOffset) {
+                root.insertChild(cloned, at: root.numberOfChildren)
+            }
+        }
+    }
+
+    private static func rebuildOutline(
+        _ node: OutlineSnapshot,
+        in destination: PDFDocument,
+        pageOffset: Int
+    ) -> PDFOutline? {
+        let copy = PDFOutline()
+        copy.label = node.label
+        if let local = node.pageIndex {
+            let target = local + pageOffset
+            if target >= 0,
+               target < destination.pageCount,
+               let dstPage = destination.page(at: target) {
+                copy.destination = PDFDestination(page: dstPage, at: node.point)
+            }
+        }
+        for child in node.children {
+            if let cloned = rebuildOutline(child, in: destination, pageOffset: pageOffset) {
+                copy.insertChild(cloned, at: copy.numberOfChildren)
+            }
+        }
+        return copy
     }
 
     private func startProgressAnimation(estimatedDuration: TimeInterval) {
@@ -422,26 +545,6 @@ struct ContentView: View {
         reflowProgress = 1.0
     }
 
-    private func startBackgroundProgressAnimation(estimatedDuration: TimeInterval) {
-        backgroundProgressTimer?.invalidate()
-        backgroundProgress = 0
-        let started = Date()
-        let ceiling = 0.97
-        let duration = max(estimatedDuration, 1.0)
-        backgroundProgressTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in
-            Task { @MainActor in
-                let elapsed = Date().timeIntervalSince(started)
-                let fraction = elapsed / duration
-                backgroundProgress = ceiling * (1.0 - exp(-3.0 * fraction))
-            }
-        }
-    }
-
-    private func stopBackgroundProgressAnimation() {
-        backgroundProgressTimer?.invalidate()
-        backgroundProgressTimer = nil
-        backgroundProgress = 1.0
-    }
 }
 
 private struct SortMenu: View {
