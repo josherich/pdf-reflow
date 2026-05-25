@@ -20,6 +20,7 @@
 		EC00000000000000000000EC /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC00000000000000000000FC /* SettingsView.swift */; };
 		ED00000000000000000000ED /* ReflowCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD00000000000000000000FD /* ReflowCache.swift */; };
 		EE00000000000000000000EE /* ReflowDurationEstimator.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE00000000000000000000FE /* ReflowDurationEstimator.swift */; };
+		EF00000000000000000000EF /* TableOfContentsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF00000000000000000000FF /* TableOfContentsView.swift */; };
 		E600000000000000000000E6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F600000000000000000000F6 /* Assets.xcassets */; };
 		E700000000000000000000E7 /* ReflowBridge in Resources */ = {isa = PBXBuildFile; fileRef = F700000000000000000000F7 /* ReflowBridge */; };
 		E800000000000000000000E8 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F800000000000000000000F8 /* Preview Assets.xcassets */; };
@@ -36,6 +37,7 @@
 		FC00000000000000000000FC /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		FD00000000000000000000FD /* ReflowCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReflowCache.swift; sourceTree = "<group>"; };
 		FE00000000000000000000FE /* ReflowDurationEstimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReflowDurationEstimator.swift; sourceTree = "<group>"; };
+		FF00000000000000000000FF /* TableOfContentsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TableOfContentsView.swift; sourceTree = "<group>"; };
 		F600000000000000000000F6 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F700000000000000000000F7 /* ReflowBridge */ = {isa = PBXFileReference; lastKnownFileType = folder; path = ReflowBridge; sourceTree = "<group>"; };
 		F800000000000000000000F8 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
@@ -78,6 +80,7 @@
 				FC00000000000000000000FC /* SettingsView.swift */,
 				FD00000000000000000000FD /* ReflowCache.swift */,
 				FE00000000000000000000FE /* ReflowDurationEstimator.swift */,
+				FF00000000000000000000FF /* TableOfContentsView.swift */,
 				F700000000000000000000F7 /* ReflowBridge */,
 				F600000000000000000000F6 /* Assets.xcassets */,
 				D300000000000000000000D3 /* Preview Content */,
@@ -204,6 +207,7 @@
 				EC00000000000000000000EC /* SettingsView.swift in Sources */,
 				ED00000000000000000000ED /* ReflowCache.swift in Sources */,
 				EE00000000000000000000EE /* ReflowDurationEstimator.swift in Sources */,
+				EF00000000000000000000EF /* TableOfContentsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
