@@ -24,6 +24,12 @@ _FONT_ALIASES = {
     "helvetica": "helv",
     "helvetica-bold": "hebo",
     "courier": "cour",
+    # PyMuPDF accepts these short names directly for its bundled CJK CID
+    # fonts; pass them through unchanged.
+    "china-s": "china-s",
+    "china-t": "china-t",
+    "japan": "japan",
+    "korea": "korea",
 }
 
 
