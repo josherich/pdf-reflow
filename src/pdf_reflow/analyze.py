@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from collections import Counter
 from typing import List, Optional, Tuple
 
+from .cjk_fonts import is_cjk_char as _is_cjk_char
 from .extract import PageContent, Span
 
 
@@ -62,15 +63,25 @@ class Block:
     @property
     def text(self) -> str:
         # Join lines with single spaces, treating common hyphenations.
+        # Exception: when the wrap point sits between two CJK characters,
+        # join them flush — CJK source lines have no inter-character
+        # whitespace, so the line break is purely a typesetting artifact
+        # of the source column width. Re-inserting a space here would
+        # both look wrong and let the re-wrap split the CJK run there,
+        # marooning Latin tokens against a stray space.
         out: List[str] = []
         for ln in self.lines:
             t = ln.text.rstrip()
             if out and out[-1].endswith("-") and len(out[-1]) > 1 and out[-1][-2].isalpha():
                 out[-1] = out[-1][:-1] + t.lstrip()
             else:
+                t = t.lstrip() if out else t
                 if out:
-                    out.append(" ")
-                out.append(t.lstrip() if out else t)
+                    prev_last = out[-1][-1] if out[-1] else ""
+                    next_first = t[:1]
+                    if not (_is_cjk_char(prev_last) and _is_cjk_char(next_first)):
+                        out.append(" ")
+                out.append(t)
         return "".join(out).strip()
 
 
@@ -350,6 +361,28 @@ def _line_bold_score(line: "Line") -> float:
     return bold / total if total else 0.0
 
 
+# CJK opening brackets / quotes that typesetters hang outside the
+# column edge. A line beginning with one of these has an x0 that sits
+# several points to the LEFT of the real column-left margin, so it
+# must NOT count toward the column-edge estimate used by the
+# paragraph-indent heuristic in ``_group_blocks``.
+_HANGING_OPEN_PUNCT = frozenset(
+    "（「『【〈《｛〔｟⟨"
+    "“‘"  # “ ‘
+)
+
+
+def _line_starts_with_hanging_punct(line: "Line") -> bool:
+    """True when the first non-whitespace char of ``line`` is a CJK
+    opening bracket / quote that hangs into the left margin."""
+    for s in line.spans:
+        for c in s.text:
+            if c.isspace():
+                continue
+            return c in _HANGING_OPEN_PUNCT
+    return False
+
+
 def _group_lines(spans: List[Span]) -> List[Line]:
     """Group spans into lines by baseline-y proximity."""
     if not spans:
@@ -465,7 +498,16 @@ def _group_blocks(lines: List[Line], page_index: int, body_size: float = 10.0) -
         # indent appears on numbered list items like ``1) US letter
         # margins``. Without this rule, all paragraphs inside a section
         # fuse into one body block and the list items disappear.
-        min_x0 = min(l.bbox[0] for l in current)
+        # Hanging punctuation: CJK typography lets opening brackets
+        # (（「『【〈《｛〔) sit outside the column edge, so a line that
+        # starts with one has x0 several points to the LEFT of the
+        # real column edge. Excluding those lines from the column-edge
+        # estimate keeps a genuine continuation line from looking
+        # paragraph-indented by comparison.
+        non_hanging = [l for l in current
+                       if not _line_starts_with_hanging_punct(l)]
+        ref_lines = non_hanging or current
+        min_x0 = min(l.bbox[0] for l in ref_lines)
         cur_para_indent = (
             ln.bbox[0] - min_x0 > 4.0
             and len(current) >= 1
@@ -793,6 +835,7 @@ def _body_block_in_gap(blocks: List[Block], y_lo: float, y_hi: float) -> bool:
 def _classify_alignment(
     blocks: List[Block],
     col_extent: Tuple[float, float],
+    body_size: float = 0.0,
 ) -> None:
     """Mark each block as centered or left-aligned within its column.
 
@@ -806,11 +849,54 @@ def _classify_alignment(
       indicate left alignment with ragged right).
     - Single-line blocks: must have both indents above 8% of column
       width AND be narrower than 80% of the column.
+
+    ``col_extent`` is the *page-frame* extent (page width minus the
+    standard margin). For documents with wide page margins (e.g. a
+    580pt wide page frame around a 340pt body column) every body
+    paragraph sits symmetrically inside the page frame and would
+    spuriously pass the centered test. Refine the extent down to the
+    actual body-text column by polling the multi-line blocks' x0/x1.
     """
-    col_left, col_right = col_extent
-    col_width = col_right - col_left
-    if col_width <= 0:
+    page_left, page_right = col_extent
+    if page_right - page_left <= 0:
         return
+    body_x0s: List[float] = []
+    body_x1s: List[float] = []
+    body_block_count = 0
+    for b in blocks:
+        if len(b.lines) < 2:
+            continue
+        # Only count blocks at body size. A multi-line block at heading
+        # size (e.g. a centered IEEE title) would otherwise pin the
+        # refined extent to its own x-edges, making the centered title
+        # look left-aligned by comparison.
+        if body_size > 0 and abs(b.size - body_size) > 0.6:
+            continue
+        body_block_count += 1
+        for ln in b.lines:
+            body_x0s.append(ln.bbox[0])
+            body_x1s.append(ln.bbox[2])
+    # Refine only when there are several body blocks to anchor the
+    # estimate. With one block we'd just be pinning the extent to that
+    # block's own edges — fine for it, broken for everyone else
+    # (e.g. the IEEE two-column full-width header has one address
+    # block and one wider title above it).
+    if body_block_count >= 2 and body_x0s and body_x1s:
+        # Column-left: the most common x0 (rounded) across body
+        # paragraph lines — that's the regular wrap position, immune
+        # to paragraph-first-line indents and hanging punctuation.
+        # Column-right: the max x1 — fully-justified CJK or Latin
+        # body lines fill out to the right edge.
+        mode_x0 = Counter(round(x) for x in body_x0s).most_common(1)[0][0]
+        col_left = max(page_left, float(mode_x0))
+        col_right = min(page_right, max(body_x1s))
+        if col_right - col_left < 50.0:
+            # Fallback if the refinement collapsed (very narrow column
+            # estimate, e.g. only one body block with constant width).
+            col_left, col_right = page_left, page_right
+    else:
+        col_left, col_right = page_left, page_right
+    col_width = col_right - col_left
     tol = max(6.0, 0.06 * col_width)
     min_indent = max(6.0, 0.05 * col_width)
 
@@ -1053,9 +1139,9 @@ def _analyze_two_column(
     left_ext = (page_margin, mid - 2)
     right_ext = (mid + 2, page.width - page_margin)
     full_ext = (page_margin, page.width - page_margin)
-    _classify_alignment(left_blocks, left_ext)
-    _classify_alignment(right_blocks, right_ext)
-    _classify_alignment(full_blocks, full_ext)
+    _classify_alignment(left_blocks, left_ext, body_size)
+    _classify_alignment(right_blocks, right_ext, body_size)
+    _classify_alignment(full_blocks, full_ext, body_size)
 
     # Figure regions PER COLUMN so a right-column figure doesn't suppress
     # left-column body text in the same y-band.
@@ -1235,7 +1321,7 @@ def analyze_page(page: PageContent, body_size: float) -> List[FlowItem]:
     _assign_columns(blocks, page.width, ncols)
     _classify_blocks(blocks, body_size)
     page_margin = 16.0
-    _classify_alignment(blocks, (page_margin, page.width - page_margin))
+    _classify_alignment(blocks, (page_margin, page.width - page_margin), body_size)
 
     fig_bands = _figure_regions(page, blocks, body_size)
 

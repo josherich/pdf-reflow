@@ -25,6 +25,7 @@ from .cjk_fonts import (
     STORE as _CJK_STORE,
     font_entry_for_fontname,
     fontname_for_script,
+    is_cjk_char as _is_cjk_char,
 )
 
 
@@ -228,25 +229,6 @@ class FontMetrics:
 # whitespace between characters, so wrapping breaks per character inside
 # a CJK run (Latin words still break on whitespace as usual).
 # ---------------------------------------------------------------------------
-
-
-def _is_cjk_char(c: str) -> bool:
-    if not c:
-        return False
-    o = ord(c)
-    return (
-        0x4E00 <= o <= 0x9FFF   # CJK Unified Ideographs
-        or 0x3400 <= o <= 0x4DBF   # CJK Ext A
-        or 0x20000 <= o <= 0x2A6DF # CJK Ext B
-        or 0xF900 <= o <= 0xFAFF   # CJK Compatibility Ideographs
-        or 0x3040 <= o <= 0x309F   # Hiragana
-        or 0x30A0 <= o <= 0x30FF   # Katakana
-        or 0xAC00 <= o <= 0xD7AF   # Hangul Syllables
-        or 0x1100 <= o <= 0x11FF   # Hangul Jamo
-        or 0x3130 <= o <= 0x318F   # Hangul Compatibility Jamo
-        or 0x3000 <= o <= 0x303F   # CJK Symbols & Punctuation
-        or 0xFF00 <= o <= 0xFFEF   # Halfwidth / Fullwidth Forms
-    )
 
 
 def _cjk_script_for_char(c: str) -> Optional[str]:
