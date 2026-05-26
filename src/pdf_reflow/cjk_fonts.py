@@ -26,8 +26,17 @@ from typing import Dict, List, Optional, Tuple
 SCRIPT_HAN = "han"
 SCRIPT_JAPAN = "japan"
 SCRIPT_KOREA = "korea"
+# Latin-extended fallback scripts. These exist so the layout can ask for
+# a "rich" serif / sans-serif font when base14 Times/Helvetica is missing
+# a glyph (IPA letters, modifier letters like U+02E4 ʔˤ, accented
+# diacritics like U+01D0 ǐ). The bundled entry maps back to base14 so
+# callers that hit this path on a host without a suitable system font
+# degrade to the same behaviour as before.
+SCRIPT_LATIN_SERIF = "latin-serif"
+SCRIPT_LATIN_SANS = "latin-sans"
 
-ALL_SCRIPTS = (SCRIPT_HAN, SCRIPT_JAPAN, SCRIPT_KOREA)
+ALL_SCRIPTS = (SCRIPT_HAN, SCRIPT_JAPAN, SCRIPT_KOREA,
+               SCRIPT_LATIN_SERIF, SCRIPT_LATIN_SANS)
 
 
 @dataclass(frozen=True)
@@ -57,6 +66,10 @@ _BUNDLED: Dict[str, CJKFontEntry] = {
     SCRIPT_HAN: CJKFontEntry("china-s", None, fullwidth=True),
     SCRIPT_JAPAN: CJKFontEntry("japan", None, fullwidth=True),
     SCRIPT_KOREA: CJKFontEntry("korea", None, fullwidth=True),
+    # No bundled Latin-extended font in PyMuPDF; degrade to base14.
+    # ``fullwidth=False`` because base14 fonts use proportional metrics.
+    SCRIPT_LATIN_SERIF: CJKFontEntry("times-roman", None, fullwidth=False),
+    SCRIPT_LATIN_SANS: CJKFontEntry("helvetica", None, fullwidth=False),
 }
 
 
@@ -78,6 +91,15 @@ _DARWIN: Dict[str, List[Tuple[str, str]]] = {
         ("AppleSDGothicNeo", "/System/Library/Fonts/AppleSDGothicNeo.ttc"),
         ("AppleGothic", "/System/Library/Fonts/Supplemental/AppleGothic.ttf"),
     ],
+    SCRIPT_LATIN_SERIF: [
+        # Apple's bundled Times has full IPA + Latin Extended-A/B.
+        ("AppleTimes", "/System/Library/Fonts/Times.ttc"),
+        ("Georgia", "/Library/Fonts/Georgia.ttf"),
+    ],
+    SCRIPT_LATIN_SANS: [
+        ("AppleHelvetica", "/System/Library/Fonts/Helvetica.ttc"),
+        ("HelveticaNeue", "/System/Library/Fonts/HelveticaNeue.ttc"),
+    ],
 }
 
 
@@ -96,6 +118,14 @@ _WIN32: Dict[str, List[Tuple[str, str]]] = {
         ("MalgunGothic", r"C:\Windows\Fonts\malgun.ttf"),
         ("MalgunGothic", r"C:\Windows\Fonts\malgun.ttc"),
         ("Gulim", r"C:\Windows\Fonts\gulim.ttc"),
+    ],
+    SCRIPT_LATIN_SERIF: [
+        ("TimesNewRoman", r"C:\Windows\Fonts\times.ttf"),
+        ("Georgia", r"C:\Windows\Fonts\georgia.ttf"),
+    ],
+    SCRIPT_LATIN_SANS: [
+        ("Arial", r"C:\Windows\Fonts\arial.ttf"),
+        ("SegoeUI", r"C:\Windows\Fonts\segoeui.ttf"),
     ],
 }
 
@@ -127,6 +157,20 @@ _LINUX: Dict[str, List[Tuple[str, str]]] = {
         ("NotoSansCJK-KR", "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc"),
         ("NotoSansKR", "/usr/share/fonts/opentype/noto/NotoSansKR-Regular.otf"),
         ("NanumGothic", "/usr/share/fonts/truetype/nanum/NanumGothic.ttf"),
+    ],
+    SCRIPT_LATIN_SERIF: [
+        ("LiberationSerif",
+         "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf"),
+        ("DejaVuSerif", "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"),
+        ("FreeSerif", "/usr/share/fonts/truetype/freefont/FreeSerif.ttf"),
+        ("NotoSerif", "/usr/share/fonts/truetype/noto/NotoSerif-Regular.ttf"),
+    ],
+    SCRIPT_LATIN_SANS: [
+        ("LiberationSans",
+         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
+        ("DejaVuSans", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        ("FreeSans", "/usr/share/fonts/truetype/freefont/FreeSans.ttf"),
+        ("NotoSans", "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"),
     ],
 }
 

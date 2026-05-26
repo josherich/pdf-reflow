@@ -212,8 +212,15 @@ class CJKFontStoreTests(unittest.TestCase):
 
     def test_by_fontname_reverse_lookup(self):
         store = CJKFontStore(platform="zos")
+        # Bundled CJK font name → entry for the matching script.
         self.assertEqual(store.by_fontname("china-s").fontname, "china-s")
-        self.assertIsNone(store.by_fontname("times-roman"))
+        # Latin fallback scripts also resolve through the store; on a
+        # platform without a system serif/sans they resolve back to the
+        # base14 fontname, so the reverse lookup matches.
+        self.assertEqual(store.by_fontname("times-roman").fontname, "times-roman")
+        # Names the resolver doesn't manage at all → None.
+        self.assertIsNone(store.by_fontname("courier"))
+        self.assertIsNone(store.by_fontname("nonexistent"))
 
     def test_system_font_actually_renders_through_pipeline(self):
         # Smoke-test the full system-font path: force the Japanese
@@ -286,8 +293,11 @@ class CJKReflowTests(unittest.TestCase):
         self.assertIn("中文标题示例", self.text)
 
     def test_chinese_body_survives(self):
+        # Use whitespace-collapsed form: wrap may land between two
+        # Latin words on adjacent output lines, which is fine.
+        flat = " ".join(self.text.split())
         for fragment in ("English words", "GPT-4", "中文段落"):
-            self.assertIn(fragment, self.text)
+            self.assertIn(fragment, flat)
 
     def test_japanese_survives(self):
         self.assertIn("これはテストです", self.text)
@@ -384,6 +394,137 @@ class OldChineseFixtureTests(unittest.TestCase):
     def test_reflow_stats(self):
         self.assertEqual(self.stats["source_pages"], 7)
         self.assertGreater(self.stats["items"], 20)
+
+
+class FontFamilyAndCoverageTests(unittest.TestCase):
+    """Serif/sans matching and Latin-extended glyph fallback."""
+
+    def _reflow(self, src_factory):
+        """Helper: build a source PDF via ``src_factory(doc)``, reflow it,
+        and return (out_doc, full_text, embedded_fontnames)."""
+        with tempfile.TemporaryDirectory() as td:
+            src = os.path.join(td, "in.pdf")
+            out = os.path.join(td, "out.pdf")
+            doc = fitz.open()
+            src_factory(doc)
+            doc.save(src); doc.close()
+            reflow_pdf(src, out, ReflowConfig())
+            od = fitz.open(out)
+            text = "\n".join(p.get_text() for p in od)
+            fonts = sorted({f[3] for i in range(od.page_count)
+                            for f in od.get_page_fonts(i)})
+            od.close()
+        return text, fonts
+
+    def test_serif_source_uses_serif_output(self):
+        # Source rendered in Times → output should embed a Times-family
+        # font, not Helvetica.
+        def build(doc):
+            p = doc.new_page(width=595, height=842)
+            for y in range(60, 800, 16):
+                p.insert_text((50, y), "This is body text in Times. " * 3,
+                              fontname="tiro", fontsize=11)
+        _, fonts = self._reflow(build)
+        self.assertTrue(any("Times" in f or "Tiro" in f.lower() for f in fonts),
+                        f"expected a serif (Times) face in output; got {fonts}")
+        self.assertFalse(any("Helvetica" in f or "helv" in f.lower() for f in fonts),
+                         f"unexpected Helvetica in serif output: {fonts}")
+
+    def test_sans_source_uses_sans_output(self):
+        # Source rendered in Helvetica → output should use Helvetica,
+        # not Times.
+        def build(doc):
+            p = doc.new_page(width=595, height=842)
+            for y in range(60, 800, 16):
+                p.insert_text((50, y), "This is body text in Helvetica. " * 3,
+                              fontname="helv", fontsize=11)
+        _, fonts = self._reflow(build)
+        self.assertTrue(any("Helv" in f for f in fonts),
+                        f"expected Helvetica family in output; got {fonts}")
+        self.assertFalse(any(("Times" in f or "Tiro" in f) for f in fonts),
+                         f"unexpected serif in sans-serif output: {fonts}")
+
+    def test_special_chars_render_via_system_fallback(self):
+        # IPA letters (ə, ɐ, ʔ, ɔ) and modifier U+02E4 (ˤ) are not in
+        # base14 Times. The pipeline should promote the paragraph to a
+        # system Latin-extended font (Liberation/Free/DejaVu) when one
+        # is installed and round-trip every codepoint.
+        special_para = "The form *k.lˤak with kə-la:k-tɐi and ʔak ɔak."
+        def build(doc):
+            p = doc.new_page(width=595, height=842)
+            # Use a font that DOES have these glyphs in source so
+            # PyMuPDF writes them properly (Liberation/Free etc.).
+            ttf = "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf"
+            if not os.path.exists(ttf):
+                self.skipTest(f"no Liberation Serif at {ttf}")
+            p.insert_font(fontname="LibSerifSrc", fontfile=ttf)
+            p.insert_text((50, 60), special_para,
+                          fontname="LibSerifSrc", fontsize=11)
+        text, fonts = self._reflow(build)
+        for ch in "ˤəɐʔɔ":
+            self.assertIn(ch, text, f"special char {ch!r} dropped in reflow")
+        # The output should embed a Latin-extended fallback (Liberation
+        # Serif on this Linux runner).
+        self.assertTrue(
+            any("Liberation" in f or "DejaVu" in f or "Free" in f
+                or "Times" in f for f in fonts),
+            f"expected serif fallback embedded; got {fonts}",
+        )
+
+    def test_family_detection_per_block(self):
+        # Two source blocks: one Helvetica, one Times — output should
+        # carry both families.
+        def build(doc):
+            p = doc.new_page(width=595, height=842)
+            for y in range(60, 200, 16):
+                p.insert_text((50, y), "Helvetica heading section",
+                              fontname="helv", fontsize=11)
+            for y in range(260, 700, 16):
+                p.insert_text((50, y), "Times body paragraph text " * 2,
+                              fontname="tiro", fontsize=11)
+        _, fonts = self._reflow(build)
+        has_helv = any("Helv" in f for f in fonts)
+        has_times = any("Times" in f or "Tiro" in f for f in fonts)
+        self.assertTrue(has_helv and has_times,
+                        f"expected both Helvetica and Times; got {fonts}")
+
+
+class OldChineseCharFallbackTests(unittest.TestCase):
+    """The sinology fixture contains IPA in English prose around CJK
+    glosses (``kə-la:k-tɐi``, ``*k.lˤak``). After the char-fallback
+    promotion these must round-trip even on paragraphs that have no
+    CJK."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not OLD_CHINESE_PDF.exists():
+            raise unittest.SkipTest(f"missing fixture: {OLD_CHINESE_PDF}")
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.out = os.path.join(cls.tmp.name, "out.pdf")
+        reflow_pdf(str(OLD_CHINESE_PDF), cls.out)
+        cls.out_doc = fitz.open(cls.out)
+        cls.text = "\n".join(p.get_text() for p in cls.out_doc)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.out_doc.close()
+        cls.tmp.cleanup()
+
+    def test_ipa_modifier_letter_survives(self):
+        # U+02E4 ˤ (modifier letter small reversed glottal stop) is the
+        # canonical "lost" char in the old base14 path.
+        if not os.path.exists(
+                "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf"):
+            self.skipTest("no Liberation Serif on this host; fallback unavailable")
+        self.assertIn("ˤ", self.text,
+                      "modifier letter ˤ (U+02E4) dropped in reflow")
+
+    def test_ipa_schwa_survives(self):
+        if not os.path.exists(
+                "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf"):
+            self.skipTest("no Liberation Serif on this host; fallback unavailable")
+        # Schwa appears in ``kə-la:k-tɐi``.
+        self.assertIn("ə", self.text, "IPA schwa dropped in reflow")
 
 
 if __name__ == "__main__":

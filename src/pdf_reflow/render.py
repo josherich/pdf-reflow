@@ -24,6 +24,8 @@ _FONT_ALIASES = {
     "times-bolditalic": "tibi",
     "helvetica": "helv",
     "helvetica-bold": "hebo",
+    "helvetica-italic": "heit",         # Helvetica-Oblique
+    "helvetica-bolditalic": "hebi",     # Helvetica-BoldOblique
     "courier": "cour",
     # PyMuPDF accepts these short names directly for its bundled CJK CID
     # fonts; pass them through unchanged.
