@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from collections import Counter
 from typing import List, Optional, Tuple
 
+from .cjk_fonts import is_cjk_char as _is_cjk_char
 from .extract import PageContent, Span
 
 
@@ -62,15 +63,25 @@ class Block:
     @property
     def text(self) -> str:
         # Join lines with single spaces, treating common hyphenations.
+        # Exception: when the wrap point sits between two CJK characters,
+        # join them flush — CJK source lines have no inter-character
+        # whitespace, so the line break is purely a typesetting artifact
+        # of the source column width. Re-inserting a space here would
+        # both look wrong and let the re-wrap split the CJK run there,
+        # marooning Latin tokens against a stray space.
         out: List[str] = []
         for ln in self.lines:
             t = ln.text.rstrip()
             if out and out[-1].endswith("-") and len(out[-1]) > 1 and out[-1][-2].isalpha():
                 out[-1] = out[-1][:-1] + t.lstrip()
             else:
+                t = t.lstrip() if out else t
                 if out:
-                    out.append(" ")
-                out.append(t.lstrip() if out else t)
+                    prev_last = out[-1][-1] if out[-1] else ""
+                    next_first = t[:1]
+                    if not (_is_cjk_char(prev_last) and _is_cjk_char(next_first)):
+                        out.append(" ")
+                out.append(t)
         return "".join(out).strip()
 
 

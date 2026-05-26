@@ -39,6 +39,30 @@ ALL_SCRIPTS = (SCRIPT_HAN, SCRIPT_JAPAN, SCRIPT_KOREA,
                SCRIPT_LATIN_SERIF, SCRIPT_LATIN_SANS)
 
 
+def is_cjk_char(c: str) -> bool:
+    """True iff ``c`` lies in a CJK / Kana / Hangul / CJK-punctuation block.
+
+    Lives here so both ``analyze`` (line-join policy) and ``layout``
+    (per-char font routing & wrap tokenization) share one definition.
+    """
+    if not c:
+        return False
+    o = ord(c)
+    return (
+        0x4E00 <= o <= 0x9FFF      # CJK Unified Ideographs
+        or 0x3400 <= o <= 0x4DBF   # CJK Ext A
+        or 0x20000 <= o <= 0x2A6DF # CJK Ext B
+        or 0xF900 <= o <= 0xFAFF   # CJK Compatibility Ideographs
+        or 0x3040 <= o <= 0x309F   # Hiragana
+        or 0x30A0 <= o <= 0x30FF   # Katakana
+        or 0xAC00 <= o <= 0xD7AF   # Hangul Syllables
+        or 0x1100 <= o <= 0x11FF   # Hangul Jamo
+        or 0x3130 <= o <= 0x318F   # Hangul Compatibility Jamo
+        or 0x3000 <= o <= 0x303F   # CJK Symbols & Punctuation
+        or 0xFF00 <= o <= 0xFFEF   # Halfwidth / Fullwidth Forms
+    )
+
+
 @dataclass(frozen=True)
 class CJKFontEntry:
     """Concrete CJK font binding for a script.

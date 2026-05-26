@@ -40,6 +40,7 @@ from pdf_reflow.reflow import ReflowConfig, reflow_pdf
 
 FIXTURES = Path(__file__).parent / "fixtures"
 OLD_CHINESE_PDF = FIXTURES / "old-chinese-a-new-construction.pdf"
+LLM_CJK_PDF = FIXTURES / "llm-cjk.pdf"
 
 
 def _make_cjk_source(path: str) -> None:
@@ -525,6 +526,126 @@ class OldChineseCharFallbackTests(unittest.TestCase):
             self.skipTest("no Liberation Serif on this host; fallback unavailable")
         # Schwa appears in ``kə-la:k-tɐi``.
         self.assertIn("ə", self.text, "IPA schwa dropped in reflow")
+
+
+class CJKLineJoinTests(unittest.TestCase):
+    """CJK paragraphs that wrap across source lines must concatenate
+    flush — joining two CJK characters with a space (because the source
+    PDF happened to break the line there) corrupts the text and lets
+    the wrapper re-break the CJK run on that bogus space.
+
+    Verified against tests/fixtures/llm-cjk.pdf, an LLM survey paper
+    written in Chinese that wraps every body paragraph across many
+    source lines.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if not LLM_CJK_PDF.exists():
+            raise unittest.SkipTest(f"missing fixture: {LLM_CJK_PDF}")
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.out = os.path.join(cls.tmp.name, "out.pdf")
+        reflow_pdf(str(LLM_CJK_PDF), cls.out, ReflowConfig())
+        cls.out_doc = fitz.open(cls.out)
+        cls.text = "\n".join(p.get_text() for p in cls.out_doc)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.out_doc.close()
+        cls.tmp.cleanup()
+
+    def test_block_text_joins_cjk_lines_without_space(self):
+        """Block.text join policy: CJK↔CJK across a line break stays
+        flush; everything else gets a single separating space."""
+        # Import inside the method so module import doesn't pay the
+        # cost on tests that don't need the analyze surface.
+        from pdf_reflow.analyze import Block, Line
+        from pdf_reflow.extract import Span
+
+        def _line(text: str, x0: float = 0.0, x1: float = 100.0,
+                  y0: float = 0.0, y1: float = 10.0, size: float = 10.0) -> Line:
+            sp = Span(text=text, bbox=(x0, y0, x1, y1),
+                      font="china-s", size=size, flags=0, color=0)
+            return Line(spans=[sp], bbox=(x0, y0, x1, y1), size=size)
+
+        # Two CJK source lines: no separator between '一个' and '明显'.
+        b = Block(lines=[_line("我们使用大语言模型。一个"),
+                         _line("明显的感受是。")],
+                  bbox=(0, 0, 100, 20), page_index=0)
+        self.assertEqual(b.text, "我们使用大语言模型。一个明显的感受是。")
+
+        # CJK→Latin across a break: keep the separator so the Latin
+        # token doesn't fuse with the preceding ideograph.
+        b = Block(lines=[_line("观察"), _line("LLM 输出")],
+                  bbox=(0, 0, 100, 20), page_index=0)
+        self.assertEqual(b.text, "观察 LLM 输出")
+
+        # Latin→Latin across a break: original behaviour preserved.
+        b = Block(lines=[_line("hello"), _line("world")],
+                  bbox=(0, 0, 100, 20), page_index=0)
+        self.assertEqual(b.text, "hello world")
+
+        # English soft-hyphen join still works (CJK exception is
+        # narrowly scoped to the non-hyphen branch).
+        b = Block(lines=[_line("under-"), _line("stand")],
+                  bbox=(0, 0, 100, 20), page_index=0)
+        self.assertEqual(b.text, "understand")
+
+    def test_known_buggy_join_points_are_flush(self):
+        """Each of these source-line boundaries used to be joined with
+        a space by the analyzer's line-merge, producing artifacts like
+        '一个 明显' or '出现幻 觉' in the reflowed body. They must now
+        appear as flush CJK runs.
+
+        Tables and other multi-cell layouts can legitimately have
+        CJK-SPACE-CJK in the reflowed text, so we check specific
+        paragraph-boundary phrases rather than a universal triple
+        sweep.
+        """
+        # Look at the raw text (with wrap newlines preserved). A
+        # wrap newline between two CJK chars is fine — what we're
+        # ruling out is an ASCII space sitting between them on the
+        # same output line.
+        for buggy in ["一个 明显", "出现幻 觉", "如何通 过其"]:
+            self.assertNotIn(
+                buggy, self.text,
+                f"spurious space at CJK line-join: {buggy!r}",
+            )
+
+    def test_specific_paragraph_round_trips_without_stray_spaces(self):
+        """The first body paragraph (page 0 of the source) reads as a
+        contiguous run of CJK with one expected ASCII span (the
+        parenthesised 'Large Language Model，LLM') and one ASCII word
+        ('LLM') — no stray spaces between Han chars."""
+        flat = "".join(self.text.split())
+        # These phrases existed verbatim in the source. After reflow,
+        # whitespace-collapsed, they must appear contiguously.
+        for phrase in [
+            "我们每天都在使用大语言模型",
+            "一个明显的感受是",
+            "也会出现幻觉",  # source wraps between '幻' and '觉'
+            "其推理过程的语言表示",
+            "我们会感到它们好像真的能像人一样思考",
+        ]:
+            self.assertIn(phrase, flat,
+                          f"CJK phrase {phrase!r} broken by line-join")
+
+    def test_inline_latin_preserves_surrounding_space(self):
+        """Latin tokens embedded in a CJK paragraph must keep one
+        space on each side — the no-space rule is narrowly scoped to
+        CJK↔CJK boundaries."""
+        flat = " ".join(self.text.split())
+        # "观察LLM" in the source has no space, but standard CJK
+        # typography (and the extractor) introduces one before/after
+        # ASCII runs. Either way, the Latin token never fuses to a
+        # CJK char without exactly one separating character.
+        for pair in ["观察 LLM", "ChatGPT 问世以来"]:
+            self.assertIn(pair, flat,
+                          f"Latin↔CJK spacing lost around {pair!r}")
+
+    def test_output_pdf_has_expected_page_count(self):
+        # Cheap sanity check that the fixture was actually consumed.
+        self.assertGreaterEqual(self.out_doc.page_count, 10)
 
 
 if __name__ == "__main__":
