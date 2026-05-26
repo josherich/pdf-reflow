@@ -78,6 +78,28 @@ class Span:
     @property
     def is_italic(self) -> bool:
         return bool(self.flags & 2) or "Italic" in self.font or "Oblique" in self.font
+    @property
+    def is_serif(self) -> bool:
+        """Whether the source span uses a serif typeface.
+
+        PyMuPDF sets the serif bit (flag bit 2) on most well-tagged
+        PDFs; some producers omit it. Fall back to the font name —
+        ``Sans`` / ``Arial`` / ``Helvetica`` / ``Verdana`` / ``Tahoma``
+        / ``Calibri`` / ``Segoe`` / ``Geneva`` are sans-serif; almost
+        every other Latin face used in published PDFs is serif.
+        """
+        if self.flags & 4:
+            return True
+        name = self.font or ""
+        sans_markers = ("Sans", "Helvetica", "Helv", "Arial", "Verdana",
+                        "Tahoma", "Calibri", "Segoe", "Geneva",
+                        "Lucida Grande", "Trebuchet", "OpenSans",
+                        "SourceSansPro", "Roboto", "NotoSans")
+        for k in sans_markers:
+            if k in name:
+                return False
+        # Default to serif: most academic / book PDFs use a serif body.
+        return True
 
 
 @dataclass

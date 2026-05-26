@@ -57,6 +57,7 @@ class Block:
     italic: bool = False
     column: int = 0        # -1 = full-width (spans both columns), 0 = left/single, 1 = right
     align: str = "left"    # 'left' | 'center'
+    family: str = "serif"  # 'serif' | 'sans' — char-weighted majority across spans
 
     @property
     def text(self) -> str:
@@ -88,6 +89,7 @@ class FlowItem:
     code_lines: List[str] = field(default_factory=list)
     align: str = "left"                 # 'left' | 'center' — preserves centered headings/captions
     indent: float = 0.0                 # for 'toc': source-pt indent of the entry relative to the block column
+    family: str = "serif"               # 'serif' | 'sans' — mirrors source typeface for output
 
 
 # Font-name prefixes that identify math-only glyph fonts. LaTeX's
@@ -397,20 +399,27 @@ def _group_blocks(lines: List[Line], page_index: int, body_size: float = 10.0) -
         x1 = max(ln.bbox[2] for ln in current); y1 = max(ln.bbox[3] for ln in current)
         sizes = Counter()
         bolds = 0; italics = 0; nspans = 0
+        serif_chars = 0; sans_chars = 0
         for ln in current:
             for s in ln.spans:
                 sizes[round(s.size, 1)] += len(s.text)
                 if s.is_bold: bolds += len(s.text)
                 if s.is_italic: italics += len(s.text)
                 nspans += len(s.text)
+                # Char-weighted serif/sans vote: a math/CJK span that
+                # falsely tests serif=True is drowned out by the body
+                # spans surrounding it.
+                if s.is_serif: serif_chars += len(s.text)
+                else: sans_chars += len(s.text)
         size = sizes.most_common(1)[0][0]
         bold = bolds * 2 >= nspans
         italic = italics * 2 >= nspans
+        family = "sans" if sans_chars > serif_chars else "serif"
         blocks.append(Block(
             lines=list(current),
             bbox=(x0, y0, x1, y1),
             page_index=page_index,
-            size=size, bold=bold, italic=italic,
+            size=size, bold=bold, italic=italic, family=family,
         ))
 
     for ln in lines:
@@ -512,6 +521,16 @@ def _detect_columns_from_spans(spans: List[Span], page_width: float) -> Tuple[in
     left_right_edge = max(s.x1 for s in left)
     right_left_edge = min(s.x0 for s in right)
     if right_left_edge - left_right_edge < 6:
+        return 1, page_width / 2
+    # Reject when a substantial number of body spans CROSS the candidate
+    # gutter — a true two-column layout has very few such spans (just
+    # full-width titles or page-spanning figure captions). Single-column
+    # documents with frequent inline font switches (italic titles,
+    # inline CJK glosses) produce many narrow fragments on each side
+    # AND many wide single spans that span the whole content width;
+    # the second population is the tell.
+    straddling = sum(1 for s in body if s.x0 < mid - 4 and s.x1 > mid + 4)
+    if straddling > 0.25 * len(body):
         return 1, page_width / 2
     # Refine mid to sit in the gutter.
     mid = (left_right_edge + right_left_edge) / 2
@@ -1116,12 +1135,12 @@ def _analyze_two_column(
                     kind="code", page_index=page.index, bbox=b.bbox,
                     text="\n".join(code_lines), size=b.size, bold=b.bold,
                     italic=b.italic, monospace=True, code_lines=code_lines,
-                    align=b.align)))
+                    align=b.align, family=b.family)))
                 continue
             items_with_key.append((sort_col, b.bbox[1], 0, FlowItem(
                 kind=b.kind, page_index=page.index, bbox=b.bbox,
                 text=b.text, size=b.size, bold=b.bold, italic=b.italic,
-                align=b.align)))
+                align=b.align, family=b.family)))
         # Figures cropped to the column.
         for (y0, y1) in fig_bands:
             x_extents: List[Tuple[float, float]] = []
@@ -1179,7 +1198,7 @@ def _analyze_two_column(
         items_with_key.append((sort_col, b.bbox[1], 0, FlowItem(
             kind=b.kind, page_index=page.index, bbox=b.bbox,
             text=b.text, size=b.size, bold=b.bold, italic=b.italic,
-            align=b.align)))
+            align=b.align, family=b.family)))
 
     # Full-width figure bands.
     for (y0, y1) in full_bands:
@@ -1294,6 +1313,7 @@ def analyze_page(page: PageContent, body_size: float) -> List[FlowItem]:
                 monospace=True,
                 code_lines=code_lines,
                 align=b.align,
+                family=b.family,
             )
             items_with_y.append((b.column, b.bbox[1], item))
             continue
@@ -1308,6 +1328,7 @@ def analyze_page(page: PageContent, body_size: float) -> List[FlowItem]:
             italic=b.italic,
             align=b.align,
             indent=indent,
+            family=b.family,
         )
         items_with_y.append((b.column, b.bbox[1], item))
 

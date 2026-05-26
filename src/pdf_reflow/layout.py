@@ -16,6 +16,16 @@ from typing import List, Optional, Tuple
 import fitz
 
 from .analyze import FlowItem, _parse_toc_entry
+from .cjk_fonts import (
+    SCRIPT_HAN,
+    SCRIPT_JAPAN,
+    SCRIPT_KOREA,
+    SCRIPT_LATIN_SANS,
+    SCRIPT_LATIN_SERIF,
+    STORE as _CJK_STORE,
+    font_entry_for_fontname,
+    fontname_for_script,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +134,20 @@ class FontMetrics:
     size for every glyph we have already seen, then computing line widths
     as a Python-side sum. For base14 fonts this is exact — MuPDF reports
     the same per-glyph advances and there is no kerning table to apply.
+
+    CJK fonts come in two flavors:
+      * Bundled PyMuPDF CID fonts (``china-s`` / ``japan`` / ``korea``)
+        — ``insert_text`` draws every glyph at fullwidth (1 em) regardless
+        of the real advance, so width must be ``len(text) * size``.
+      * System TTF/OTF fonts (Noto Sans CJK, PingFang, Microsoft YaHei,
+        …) — glyph widths are proportional and ``Font.text_length`` is
+        accurate. Loaded via ``fitz.Font(fontfile=path)`` so we route
+        widths through the actual font.
+    The right strategy is picked from the CJK font store at measure time.
     """
+
+    _BUNDLED_CJK = frozenset({"china-s", "china-t", "japan", "korea",
+                              "china-ss", "china-ts", "japan-s", "korea-s"})
 
     _cache: dict = {}
     # (font_name) -> {chr: advance_at_size_1.0}
@@ -136,7 +159,12 @@ class FontMetrics:
     def font(cls, name: str) -> fitz.Font:
         f = cls._cache.get(name)
         if f is None:
-            f = fitz.Font(name)
+            entry = font_entry_for_fontname(name)
+            if entry is not None and entry.fontfile is not None:
+                # System CJK font — load by file path.
+                f = fitz.Font(fontfile=entry.fontfile)
+            else:
+                f = fitz.Font(name)
             cls._cache[name] = f
         return f
 
@@ -162,6 +190,11 @@ class FontMetrics:
     def width(cls, font_name: str, text: str, size: float) -> float:
         if not text:
             return 0.0
+        # Bundled CJK CID fonts: PyMuPDF's insert_text draws every glyph
+        # at fullwidth regardless of the real advance, so width must
+        # match — otherwise wrap boundaries don't line up with rendering.
+        if font_name in cls._BUNDLED_CJK:
+            return len(text) * size
         t = cls._char_widths(font_name)
         total = 0.0
         font = None
@@ -177,14 +210,332 @@ class FontMetrics:
 
 
 # ---------------------------------------------------------------------------
+# CJK support.
+#
+# Base14 PDF fonts (Times / Courier / Helvetica) carry no CJK glyphs, so
+# inserting CJK text with them silently drops every codepoint. PyMuPDF
+# bundles four CID fonts that cover the major CJK scripts and accept
+# directly as fontnames to ``Page.insert_text``:
+#
+#   china-s  Simplified Chinese (also covers most CJK Unified Ideographs)
+#   china-t  Traditional Chinese
+#   japan    Japanese (hiragana / katakana, kanji via Han)
+#   korea    Korean (hangul + Han)
+#
+# Each font handles its own script plus the shared Han block — but
+# china-s has no hangul and korea has no kana, so we route each character
+# to the right font based on its Unicode block. CJK doesn't use
+# whitespace between characters, so wrapping breaks per character inside
+# a CJK run (Latin words still break on whitespace as usual).
+# ---------------------------------------------------------------------------
+
+
+def _is_cjk_char(c: str) -> bool:
+    if not c:
+        return False
+    o = ord(c)
+    return (
+        0x4E00 <= o <= 0x9FFF   # CJK Unified Ideographs
+        or 0x3400 <= o <= 0x4DBF   # CJK Ext A
+        or 0x20000 <= o <= 0x2A6DF # CJK Ext B
+        or 0xF900 <= o <= 0xFAFF   # CJK Compatibility Ideographs
+        or 0x3040 <= o <= 0x309F   # Hiragana
+        or 0x30A0 <= o <= 0x30FF   # Katakana
+        or 0xAC00 <= o <= 0xD7AF   # Hangul Syllables
+        or 0x1100 <= o <= 0x11FF   # Hangul Jamo
+        or 0x3130 <= o <= 0x318F   # Hangul Compatibility Jamo
+        or 0x3000 <= o <= 0x303F   # CJK Symbols & Punctuation
+        or 0xFF00 <= o <= 0xFFEF   # Halfwidth / Fullwidth Forms
+    )
+
+
+def _cjk_script_for_char(c: str) -> Optional[str]:
+    """Pick the CJK script that owns ``c`` (or None for non-CJK)."""
+    if not c:
+        return None
+    o = ord(c)
+    if 0x3040 <= o <= 0x30FF:
+        return SCRIPT_JAPAN
+    if 0xAC00 <= o <= 0xD7AF or 0x1100 <= o <= 0x11FF or 0x3130 <= o <= 0x318F:
+        return SCRIPT_KOREA
+    if _is_cjk_char(c):
+        # Han / CJK punctuation / halfwidth-fullwidth → Chinese by default.
+        return SCRIPT_HAN
+    return None
+
+
+def _cjk_font_for_char(c: str) -> Optional[str]:
+    """Return the *concrete fontname* used to render ``c``.
+
+    None when ``c`` is not CJK — the caller keeps its requested base14
+    font. Concrete fontname comes from the CJK font store, so it may be
+    a bundled name (``china-s``) or a system-resolved name (e.g.
+    ``NotoSansCJK-SC``).
+    """
+    script = _cjk_script_for_char(c)
+    if script is None:
+        return None
+    return fontname_for_script(script)
+
+
+def _dominant_cjk_font(text: str) -> Optional[str]:
+    """Pick a single concrete CJK fontname for a run of mixed text.
+
+    Used when we must commit to one fontname for an entire line draw call.
+    Kana presence wins (only the Japanese font reliably covers them);
+    else Hangul wins (only the Korean font reliably covers it); else any
+    Han glyph falls back to the Han font. Returns None if the text
+    contains no CJK at all.
+    """
+    has_kana = False
+    has_hangul = False
+    has_han = False
+    for c in text:
+        script = _cjk_script_for_char(c)
+        if script == SCRIPT_JAPAN:
+            has_kana = True
+        elif script == SCRIPT_KOREA:
+            has_hangul = True
+        elif script == SCRIPT_HAN:
+            has_han = True
+    if has_kana:
+        return fontname_for_script(SCRIPT_JAPAN)
+    if has_hangul:
+        return fontname_for_script(SCRIPT_KOREA)
+    if has_han:
+        return fontname_for_script(SCRIPT_HAN)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Font family + glyph-coverage promotion.
+# ---------------------------------------------------------------------------
+
+
+def _base_font_for(family: str, bold: bool, italic: bool) -> str:
+    """Pick the base14 font name that matches the source's serif/sans
+    style and the requested weight / slant.
+
+    ``family`` is taken from the source block's char-weighted majority
+    of serif vs sans-serif spans, so a sans-serif heading inside a
+    serif paper renders in a sans-serif face, and vice versa.
+    """
+    if family == "sans":
+        if bold and italic:
+            return "helvetica-bolditalic"
+        if bold:
+            return "helvetica-bold"
+        if italic:
+            return "helvetica-italic"
+        return "helvetica"
+    if bold and italic:
+        return "times-bolditalic"
+    if bold:
+        return "times-bold"
+    if italic:
+        return "times-italic"
+    return "times-roman"
+
+
+# Base14 PDF fonts (Times / Helvetica / Courier as exposed by PyMuPDF's
+# short names) use the WinAnsi encoding when drawn via ``insert_text``.
+# Even though MuPDF's ``Font.has_glyph`` may report a glyph for, say,
+# U+012B (ī), the encoding can't actually address it — insert_text
+# substitutes the bullet glyph. We therefore explicitly enumerate the
+# codepoints that round-trip through base14 fonts; everything else
+# needs a system fallback regardless of what has_glyph claims.
+_BASE14_FONTS = frozenset({
+    "times-roman", "times-bold", "times-italic", "times-bolditalic",
+    "helvetica", "helvetica-bold", "helvetica-italic", "helvetica-bolditalic",
+    "courier", "courier-bold", "courier-italic", "courier-bolditalic",
+})
+
+# WinAnsi codepoints: printable ASCII + Latin-1 supplement + a fixed
+# set of typographic / European extras (smart quotes, dashes, OE/oe,
+# S-caron / Z-caron / Y-diaeresis, modifier circumflex/tilde, dagger,
+# euro, ellipsis, bullet, trademark, per-mille).
+_WINANSI_CODEPOINTS = (
+    set(range(0x0020, 0x007F))      # printable ASCII
+    | set(range(0x00A0, 0x0100))    # Latin-1 supplement
+    | {
+        0x20AC, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6,
+        0x2030, 0x0160, 0x2039, 0x0152, 0x017D, 0x2018, 0x2019, 0x201C,
+        0x201D, 0x2022, 0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A,
+        0x0153, 0x017E, 0x0178,
+    }
+)
+
+
+class GlyphCoverage:
+    """Cache per-(fontname, codepoint) glyph presence checks.
+
+    For base14 fonts we use the WinAnsi whitelist above (because
+    ``Font.has_glyph`` is unreliable for those — the glyph may exist
+    in the font but be unaddressable through the encoding insert_text
+    uses). For system / CJK fonts we trust ``has_glyph``.
+    """
+
+    _cache: dict = {}
+
+    @classmethod
+    def has(cls, font_name: str, codepoint: int) -> bool:
+        if font_name in _BASE14_FONTS:
+            return codepoint in _WINANSI_CODEPOINTS
+        key = (font_name, codepoint)
+        v = cls._cache.get(key)
+        if v is None:
+            font = FontMetrics.font(font_name)
+            v = bool(font.has_glyph(codepoint))
+            cls._cache[key] = v
+        return v
+
+
+def _text_fully_covered(font_name: str, text: str) -> bool:
+    """Return True iff every non-whitespace char in ``text`` is
+    addressable in ``font_name``."""
+    for c in text:
+        if c.isspace():
+            continue
+        if not GlyphCoverage.has(font_name, ord(c)):
+            return False
+    return True
+
+
+def _family_of(font_name: str) -> str:
+    """Recover the serif/sans family from a base14 fontname so the
+    Latin-extended fallback can match it."""
+    if font_name.startswith("helvetica"):
+        return "sans"
+    return "serif"
+
+
+def _latin_fallback_for(base_font: str) -> Optional[str]:
+    """Pick the Latin-extended fallback fontname matching ``base_font``'s
+    family. Returns None when the resolver has no system font (i.e. the
+    fallback collapses back to the base font and would be a no-op).
+    """
+    script = (SCRIPT_LATIN_SANS if _family_of(base_font) == "sans"
+              else SCRIPT_LATIN_SERIF)
+    fb = fontname_for_script(script)
+    return None if fb == base_font else fb
+
+
+def _font_for_char(c: str, base_font: str) -> str:
+    """Pick the best font to render a single char given the paragraph's
+    base font.
+
+    Priority:
+      1. CJK chars → the appropriate CJK font (china-s / japan / korea
+         or whichever system font the resolver chose for that script).
+      2. Chars covered by ``base_font`` (incl. the WinAnsi fast-path
+         that all base14 fonts share) → ``base_font``.
+      3. Else, a system Latin-extended fallback matching the family
+         (Liberation Serif / Sans, DejaVu, Free, Noto). When none is
+         installed we degrade to ``base_font`` and the glyph drops at
+         render time — the same best-effort fallback as before.
+    """
+    if c.isspace():
+        return base_font
+    # CJK chars always go to their script's font, regardless of base.
+    cjk = _cjk_font_for_char(c)
+    if cjk is not None:
+        return cjk
+    o = ord(c)
+    if GlyphCoverage.has(base_font, o):
+        return base_font
+    fb = _latin_fallback_for(base_font)
+    if fb is not None and GlyphCoverage.has(fb, o):
+        return fb
+    return base_font
+
+
+def _split_into_font_runs(text: str, base_font: str) -> List[Tuple[str, str]]:
+    """Walk ``text`` and group consecutive chars that need the same font.
+
+    Returns a list of ``(fontname, substring)`` pairs ready to feed to
+    consecutive ``insert_text`` calls. Empty input returns an empty list.
+    """
+    runs: List[Tuple[str, str]] = []
+    cur_font: Optional[str] = None
+    cur: List[str] = []
+    for c in text:
+        f = _font_for_char(c, base_font)
+        if cur_font is None or f == cur_font:
+            cur.append(c)
+            cur_font = f
+        else:
+            runs.append((cur_font, "".join(cur)))
+            cur = [c]
+            cur_font = f
+    if cur and cur_font is not None:
+        runs.append((cur_font, "".join(cur)))
+    return runs
+
+
+def _multifont_width(text: str, base_font: str, size: float) -> float:
+    """Width of ``text`` if rendered with per-char font fallback off
+    ``base_font``. Used by the wrap engine so line boundaries match
+    what ``emit_text_line`` actually draws."""
+    if not text:
+        return 0.0
+    total = 0.0
+    for font, run in _split_into_font_runs(text, base_font):
+        total += FontMetrics.width(font, run, size)
+    return total
+
+
+# Kept for backwards compatibility with callers that want the old
+# "single fontname per paragraph" decision (e.g. the TOC dot-leader
+# code path where the leader must be drawn in one font). Equivalent to
+# the previous CJK-only promotion.
+def _pick_font(base_font: str, text: str) -> str:
+    cjk = _dominant_cjk_font(text)
+    return cjk if cjk is not None else base_font
+
+
+# ---------------------------------------------------------------------------
 # Line breaking.
 # ---------------------------------------------------------------------------
 
 
-def _split_words(text: str) -> List[str]:
-    """Word-tokenize while preserving spaces and breaks. We keep each word as
-    a string; spaces are added back during measurement."""
-    return text.split()
+def _tokenize_for_wrap(text: str) -> List[Tuple[str, bool]]:
+    """Tokenize ``text`` into ``(token, had_leading_whitespace)`` pairs.
+
+    Latin words stay grouped (no breaks inside a word). Each CJK char is
+    its own token because CJK lines wrap at any character boundary —
+    there are no inter-character spaces to use as break opportunities.
+    Whitespace in the source is collapsed and lifted into the boolean
+    flag, so the wrapper can faithfully reproduce ``詩經 Shījīng``
+    (Han + space + transcription) but elide gaps inside a pure CJK run.
+    """
+    tokens: List[Tuple[str, bool]] = []
+    buf: List[str] = []
+    pending_ws = False
+
+    def flush_buf():
+        nonlocal pending_ws
+        if not buf:
+            return
+        # Defensive: split on any whitespace that may have slipped into
+        # the Latin buffer (shouldn't happen — we drain on whitespace).
+        words = "".join(buf).split()
+        for i, w in enumerate(words):
+            tokens.append((w, pending_ws if i == 0 else True))
+        buf.clear()
+        pending_ws = False
+
+    for ch in text:
+        if _is_cjk_char(ch):
+            flush_buf()
+            tokens.append((ch, pending_ws))
+            pending_ws = False
+        elif ch.isspace():
+            flush_buf()
+            pending_ws = True
+        else:
+            buf.append(ch)
+    flush_buf()
+    return tokens
 
 
 def _wrap_paragraph(
@@ -193,32 +544,44 @@ def _wrap_paragraph(
     size: float,
     max_width: float,
 ) -> List[str]:
-    words = _split_words(text)
-    if not words:
+    """Wrap ``text`` to ``max_width`` using per-char font fallback off
+    ``font`` for width measurement. ``font`` is the paragraph's *base*
+    font; individual CJK chars and Latin-extended glyphs are measured
+    against their resolved fallback so the wrap boundaries line up
+    with what ``emit_text_line`` ends up drawing."""
+    tokens = _tokenize_for_wrap(text)
+    if not tokens:
         return []
     lines: List[str] = []
-    cur: List[str] = []
+    cur: List[str] = []      # alternating tokens + " " separators as added
     cur_width = 0.0
+    # Whitespace renders in the base font (covered by base14 WinAnsi).
     space_w = FontMetrics.width(font, " ", size)
 
-    for w in words:
-        ww = FontMetrics.width(font, w, size)
-        if ww > max_width and not cur:
-            # Single token wider than line: hard-break by chars.
-            for chunk in _break_oversize_word(w, font, size, max_width):
+    for tok, had_ws in tokens:
+        tw = _multifont_width(tok, font, size)
+        # Preserve source whitespace: include a separator only when the
+        # source had one. This keeps inline ``詩經 Shījīng`` spaced
+        # while still letting two CJK chars sit flush.
+        sep = bool(cur) and had_ws
+        sep_w = space_w if sep else 0.0
+        if tw > max_width and not cur:
+            for chunk in _break_oversize_word(tok, font, size, max_width):
                 lines.append(chunk)
             cur_width = 0.0
             continue
-        proposed = cur_width + (space_w if cur else 0.0) + ww
+        proposed = cur_width + sep_w + tw
         if proposed <= max_width or not cur:
-            cur.append(w)
+            if sep:
+                cur.append(" ")
+            cur.append(tok)
             cur_width = proposed
         else:
-            lines.append(" ".join(cur))
-            cur = [w]
-            cur_width = ww
+            lines.append("".join(cur))
+            cur = [tok]
+            cur_width = tw
     if cur:
-        lines.append(" ".join(cur))
+        lines.append("".join(cur))
     return lines
 
 
@@ -232,7 +595,7 @@ def _break_oversize_word(word: str, font: str, size: float, max_width: float) ->
         best = 1
         while lo <= hi:
             mid = (lo + hi) // 2
-            wpx = FontMetrics.width(font, word[start:start + mid], size)
+            wpx = _multifont_width(word[start:start + mid], font, size)
             if wpx <= max_width:
                 best = mid
                 lo = mid + 1
@@ -281,14 +644,22 @@ class _PageBuilder:
         if line_h > self.remaining():
             self._open_page()
         baseline = self.y + size
+        # Split into per-font runs so chars missing from the base font
+        # (IPA, modifier letters, CJK) get drawn in their fallback —
+        # the same coverage logic that the wrap engine measured with,
+        # so x-offsets line up exactly.
+        runs = _split_into_font_runs(text, font)
+        line_w = sum(FontMetrics.width(rf, rt, size) for rf, rt in runs)
         if x is not None:
             cx = x
         elif align == "center":
-            w = FontMetrics.width(font, text, size)
-            cx = self.cfg.content_left + max(0.0, (self.cfg.content_width - w) / 2)
+            cx = self.cfg.content_left + max(0.0, (self.cfg.content_width - line_w) / 2)
         else:
             cx = self.cfg.content_left
-        self.current.ops.append(DrawText(x=cx, y=baseline, text=text, font=font, size=size))
+        for rf, rt in runs:
+            self.current.ops.append(
+                DrawText(x=cx, y=baseline, text=rt, font=rf, size=size))
+            cx += FontMetrics.width(rf, rt, size)
         self.y += line_h
 
     def emit_toc_entry(
@@ -337,11 +708,17 @@ class _PageBuilder:
             if line_h > self.remaining():
                 self._open_page()
             baseline = self.y + size
-            self.current.ops.append(DrawText(
-                x=left, y=baseline, text=line_text, font=font, size=size,
-            ))
+            # Title may contain CJK / IPA chars that need fallback fonts;
+            # render per-run so the right glyphs reach the output.
+            cx = left
+            title_runs = _split_into_font_runs(line_text, font)
+            for rf, rt in title_runs:
+                self.current.ops.append(DrawText(
+                    x=cx, y=baseline, text=rt, font=rf, size=size,
+                ))
+                cx += FontMetrics.width(rf, rt, size)
             if i == len(title_lines) - 1:
-                title_w = FontMetrics.width(font, line_text, size)
+                title_w = cx - left
                 gap = avail - title_w - page_w - 2 * space_w
                 if gap >= dot_w:
                     n_dots = max(1, int(gap / dot_w))
@@ -392,6 +769,10 @@ def layout(
         text = text.strip()
         if not text:
             return
+        # ``font`` is the requested *base* font; per-char fallback inside
+        # _wrap_paragraph / emit_text_line routes CJK chars to the
+        # appropriate CJK font and any remaining missing glyphs (IPA,
+        # modifier letters, …) to a system Latin-extended font.
         if lead_space:
             pb.add_space(lead_space)
         for line in _wrap_paragraph(text, font, size, cw):
@@ -421,12 +802,14 @@ def layout(
             # Level 3 headings keep their italic flag — IEEE-style
             # sub-section heads render as italic, not bold. Level 1/2
             # always render as bold; bold-italic when both flags set.
+            # Family comes from the source block so a sans-serif
+            # heading inside an otherwise serif paper stays sans-serif.
             if level == 3 and it.italic and not it.bold:
-                font = "times-italic"
+                font = _base_font_for(it.family, bold=False, italic=True)
             elif it.italic and it.bold:
-                font = "times-bolditalic"
+                font = _base_font_for(it.family, bold=True, italic=True)
             else:
-                font = "times-bold"
+                font = _base_font_for(it.family, bold=True, italic=False)
             pb.add_space(space_above)
             # Ensure room for at least one heading line before recording the
             # anchor so the anchor page/y reflects any page-break that occurs.
@@ -440,12 +823,13 @@ def layout(
             emit_paragraph(it.text, font, size, align=it.align)
             pb.add_space(cfg.heading_space_below)
         elif it.kind == "body":
-            font = "times-italic" if it.italic else ("times-bold" if it.bold else "times-roman")
+            font = _base_font_for(it.family, bold=it.bold, italic=it.italic)
             emit_paragraph(it.text, font, body, lead_space=cfg.para_space, align=it.align)
         elif it.kind == "toc":
             parsed = _parse_toc_entry(it.text)
+            base = _base_font_for(it.family, bold=False, italic=False)
             if parsed is None:
-                emit_paragraph(it.text, "times-roman", body, lead_space=cfg.para_space,
+                emit_paragraph(it.text, base, body, lead_space=cfg.para_space,
                                align=it.align)
                 continue
             title, page_label = parsed
@@ -455,21 +839,24 @@ def layout(
             pb.emit_toc_entry(
                 title=title,
                 page=page_label,
-                font="times-roman",
+                font=base,
                 size=body,
                 indent=scaled_indent,
             )
         elif it.kind == "caption":
-            font = "times-italic" if it.italic else "times-roman"
+            font = _base_font_for(it.family, bold=False, italic=it.italic)
             emit_paragraph(it.text, font, cfg.caption_size, lead_space=cfg.para_space, align=it.align)
         elif it.kind == "code":
             # Pre-formatted: each source line drawn at code_size. If a line is
             # wider than the column, scale the code_size down for that block
             # so it fits without horizontal scroll.
             lines = it.code_lines or [it.text]
+            # Courier base; per-char fallback handles any CJK/IPA chars
+            # in code blocks (monospaced spacing is lost on fallback
+            # chars but the text is at least visible).
             font = "courier"
             size = cfg.code_size
-            longest = max((FontMetrics.width(font, ln, size) for ln in lines), default=0.0)
+            longest = max((_multifont_width(ln, font, size) for ln in lines), default=0.0)
             if longest > cw:
                 size = max(6.0, size * cw / longest)
             block_height = cfg.para_space + len(lines) * size * cfg.line_height_mult
@@ -495,6 +882,7 @@ def layout(
             pb.emit_image(it.page_index, src, w, h)
         else:
             # Unknown kind: fall back to body rendering.
-            emit_paragraph(it.text, "times-roman", body, lead_space=cfg.para_space)
+            emit_paragraph(it.text, _base_font_for(it.family, False, False),
+                           body, lead_space=cfg.para_space)
 
     return pb.pages, anchors

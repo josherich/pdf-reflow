@@ -136,6 +136,16 @@ def reflow_pdf(src_path: str, dst_path: str, cfg: Optional[ReflowConfig] = None)
         out = render(doc, laid_out, layout_cfg,
                      source_path=src_path, workers=workers or 1)
         _apply_toc(doc, out, anchors)
+        # System Latin-extended / CJK fallback fonts are embedded per
+        # page; subset before save so we only carry the glyphs each
+        # page actually uses (saves ~50% on docs that hit fallback for
+        # just a few chars per page, e.g. a stray ≤ or ə).
+        try:
+            out.subset_fonts()
+        except Exception:
+            # subset_fonts is best-effort; some font versions don't
+            # support it. Bail silently rather than fail the reflow.
+            pass
         out.save(dst_path, deflate=True, deflate_images=True, deflate_fonts=True, garbage=4)
         out_pages = out.page_count
         out.close()
