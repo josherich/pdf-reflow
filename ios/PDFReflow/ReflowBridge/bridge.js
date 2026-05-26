@@ -12,6 +12,7 @@ const PYMUPDF_WHEEL_URL = "pymupdf.whl";
 const PDF_REFLOW_SOURCES = [
   "__init__.py",
   "__main__.py",
+  "cjk_fonts.py",
   "extract.py",
   "analyze.py",
   "layout.py",
