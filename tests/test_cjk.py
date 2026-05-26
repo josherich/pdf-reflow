@@ -676,6 +676,76 @@ class CJKLineJoinTests(unittest.TestCase):
         self.assertIn("工作机制极其复杂", flat)
         self.assertIn("复杂，给对其能力的研究", flat)
 
+    def test_body_paragraphs_not_misclassified_as_centered(self):
+        """Regression: ``_classify_alignment`` used the *page-frame*
+        extent as the column reference. Documents with wide page
+        margins (e.g. tests/fixtures/llm-cjk.pdf — a 612pt page with
+        ~120pt margins on each side) have body text that sits roughly
+        symmetric inside that frame, so every multi-line body
+        paragraph was getting flagged ``align='center'`` and rendered
+        centered in the reflowed output.
+
+        After the fix, alignment is measured against the actual body
+        text column (mode of x0, max of x1 across multi-line blocks),
+        so only genuinely centered items (titles, author lines,
+        figure captions) get the centered flag.
+        """
+        from pdf_reflow.analyze import analyze_page
+        from pdf_reflow.extract import extract_page
+
+        doc = fitz.open(str(LLM_CJK_PDF))
+        try:
+            # Sample the first few pages — the body paragraphs that
+            # used to be mis-flagged are dense across the document.
+            wrongly_centered: list[str] = []
+            for pi in range(min(3, doc.page_count)):
+                p = extract_page(doc[pi], pi)
+                for it in analyze_page(p, body_size=10.5):
+                    if it.kind != "body" or it.align != "center":
+                        continue
+                    # Multi-sentence body paragraphs that obviously
+                    # weren't centered in the source — the LLM
+                    # paper's '·' bullets and ChatGPT/本文 paragraphs.
+                    if len(it.text) > 60 and any(
+                            tag in it.text for tag in
+                            ("ChatGPT", "本文将", "本文讨论", "LLM 的学习")):
+                        wrongly_centered.append(it.text[:80])
+            self.assertEqual(
+                wrongly_centered, [],
+                "body paragraphs spuriously flagged as centered: "
+                f"{wrongly_centered}",
+            )
+        finally:
+            doc.close()
+
+    def test_genuinely_centered_items_still_detected(self):
+        """The fix tightens the centered-classifier, but real
+        centered items (author lines, figure captions) must still be
+        flagged so they render centered in the reflowed output."""
+        from pdf_reflow.analyze import analyze_page
+        from pdf_reflow.extract import extract_page
+
+        doc = fitz.open(str(LLM_CJK_PDF))
+        try:
+            centered_texts: list[str] = []
+            for pi in range(min(3, doc.page_count)):
+                p = extract_page(doc[pi], pi)
+                for it in analyze_page(p, body_size=10.5):
+                    if it.align == "center":
+                        centered_texts.append(it.text)
+        finally:
+            doc.close()
+        joined = "\n".join(centered_texts)
+        # Author line on page 0 — three names separated by ， should
+        # remain centered.
+        self.assertIn("李航", joined)
+        # Figure caption pattern — '图 N:' captions on later pages
+        # should remain centered.
+        self.assertTrue(
+            any(t.startswith("图 ") for t in centered_texts),
+            f"expected a centered '图 N:' caption; got {centered_texts}",
+        )
+
     def test_hanging_punct_helper(self):
         """Unit test for ``_line_starts_with_hanging_punct``: the
         helper that drives the column-edge fix."""

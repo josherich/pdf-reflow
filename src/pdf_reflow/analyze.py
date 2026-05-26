@@ -835,6 +835,7 @@ def _body_block_in_gap(blocks: List[Block], y_lo: float, y_hi: float) -> bool:
 def _classify_alignment(
     blocks: List[Block],
     col_extent: Tuple[float, float],
+    body_size: float = 0.0,
 ) -> None:
     """Mark each block as centered or left-aligned within its column.
 
@@ -848,11 +849,54 @@ def _classify_alignment(
       indicate left alignment with ragged right).
     - Single-line blocks: must have both indents above 8% of column
       width AND be narrower than 80% of the column.
+
+    ``col_extent`` is the *page-frame* extent (page width minus the
+    standard margin). For documents with wide page margins (e.g. a
+    580pt wide page frame around a 340pt body column) every body
+    paragraph sits symmetrically inside the page frame and would
+    spuriously pass the centered test. Refine the extent down to the
+    actual body-text column by polling the multi-line blocks' x0/x1.
     """
-    col_left, col_right = col_extent
-    col_width = col_right - col_left
-    if col_width <= 0:
+    page_left, page_right = col_extent
+    if page_right - page_left <= 0:
         return
+    body_x0s: List[float] = []
+    body_x1s: List[float] = []
+    body_block_count = 0
+    for b in blocks:
+        if len(b.lines) < 2:
+            continue
+        # Only count blocks at body size. A multi-line block at heading
+        # size (e.g. a centered IEEE title) would otherwise pin the
+        # refined extent to its own x-edges, making the centered title
+        # look left-aligned by comparison.
+        if body_size > 0 and abs(b.size - body_size) > 0.6:
+            continue
+        body_block_count += 1
+        for ln in b.lines:
+            body_x0s.append(ln.bbox[0])
+            body_x1s.append(ln.bbox[2])
+    # Refine only when there are several body blocks to anchor the
+    # estimate. With one block we'd just be pinning the extent to that
+    # block's own edges — fine for it, broken for everyone else
+    # (e.g. the IEEE two-column full-width header has one address
+    # block and one wider title above it).
+    if body_block_count >= 2 and body_x0s and body_x1s:
+        # Column-left: the most common x0 (rounded) across body
+        # paragraph lines — that's the regular wrap position, immune
+        # to paragraph-first-line indents and hanging punctuation.
+        # Column-right: the max x1 — fully-justified CJK or Latin
+        # body lines fill out to the right edge.
+        mode_x0 = Counter(round(x) for x in body_x0s).most_common(1)[0][0]
+        col_left = max(page_left, float(mode_x0))
+        col_right = min(page_right, max(body_x1s))
+        if col_right - col_left < 50.0:
+            # Fallback if the refinement collapsed (very narrow column
+            # estimate, e.g. only one body block with constant width).
+            col_left, col_right = page_left, page_right
+    else:
+        col_left, col_right = page_left, page_right
+    col_width = col_right - col_left
     tol = max(6.0, 0.06 * col_width)
     min_indent = max(6.0, 0.05 * col_width)
 
@@ -1095,9 +1139,9 @@ def _analyze_two_column(
     left_ext = (page_margin, mid - 2)
     right_ext = (mid + 2, page.width - page_margin)
     full_ext = (page_margin, page.width - page_margin)
-    _classify_alignment(left_blocks, left_ext)
-    _classify_alignment(right_blocks, right_ext)
-    _classify_alignment(full_blocks, full_ext)
+    _classify_alignment(left_blocks, left_ext, body_size)
+    _classify_alignment(right_blocks, right_ext, body_size)
+    _classify_alignment(full_blocks, full_ext, body_size)
 
     # Figure regions PER COLUMN so a right-column figure doesn't suppress
     # left-column body text in the same y-band.
@@ -1277,7 +1321,7 @@ def analyze_page(page: PageContent, body_size: float) -> List[FlowItem]:
     _assign_columns(blocks, page.width, ncols)
     _classify_blocks(blocks, body_size)
     page_margin = 16.0
-    _classify_alignment(blocks, (page_margin, page.width - page_margin))
+    _classify_alignment(blocks, (page_margin, page.width - page_margin), body_size)
 
     fig_bands = _figure_regions(page, blocks, body_size)
 
