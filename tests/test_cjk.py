@@ -647,6 +647,62 @@ class CJKLineJoinTests(unittest.TestCase):
         # Cheap sanity check that the fixture was actually consumed.
         self.assertGreaterEqual(self.out_doc.page_count, 10)
 
+    def test_paragraph_not_split_at_hanging_punct_line(self):
+        """Regression: source page 0 has a 3-line paragraph whose
+        middle line starts with the fullwidth opening paren ``（`` —
+        CJK typesetting hangs that bracket outside the column edge,
+        so its x0 is several points to the left of the regular
+        column-left margin. The block-merger's first-line-indent
+        heuristic used to take that hanging x0 as the column edge,
+        which made the third line (a normal continuation at the real
+        column edge) look paragraph-indented by comparison and split
+        off into its own block.
+
+        The user-visible artifact was a paragraph break in the
+        middle of one sentence:
+
+            工作机制极
+            其复杂，给
+            对其能力的研究带来了很大困难。
+
+        After the fix, the whole sentence flows as one paragraph
+        with no premature break.
+        """
+        # The full source sentence is "...工作机制极其复杂，给对其能力
+        # 的研究带来了很大困难。" The wrap may break between any two
+        # CJK chars, so check the join points that the bug would have
+        # turned into paragraph boundaries.
+        flat = "".join(self.text.split())
+        self.assertIn("工作机制极其复杂", flat)
+        self.assertIn("复杂，给对其能力的研究", flat)
+
+    def test_hanging_punct_helper(self):
+        """Unit test for ``_line_starts_with_hanging_punct``: the
+        helper that drives the column-edge fix."""
+        from pdf_reflow.analyze import (
+            Line,
+            _line_starts_with_hanging_punct,
+        )
+        from pdf_reflow.extract import Span
+
+        def _line(text: str) -> Line:
+            sp = Span(text=text, bbox=(0, 0, 50, 10),
+                      font="china-s", size=10.0, flags=0, color=0)
+            return Line(spans=[sp], bbox=(0, 0, 50, 10), size=10.0)
+
+        # Fullwidth opening bracket — hangs.
+        self.assertTrue(_line_starts_with_hanging_punct(_line("（Mechanics）")))
+        self.assertTrue(_line_starts_with_hanging_punct(_line("「引用」")))
+        # Leading whitespace is skipped before the test.
+        self.assertTrue(_line_starts_with_hanging_punct(_line("  （x）")))
+        # Regular CJK char — does not hang.
+        self.assertFalse(_line_starts_with_hanging_punct(_line("对其能力")))
+        # ASCII opening paren — handled by Latin typography, doesn't
+        # hang in the CJK sense.
+        self.assertFalse(_line_starts_with_hanging_punct(_line("(see fig.)")))
+        # Closing brackets don't hang on the left.
+        self.assertFalse(_line_starts_with_hanging_punct(_line("）然后")))
+
 
 if __name__ == "__main__":
     unittest.main()

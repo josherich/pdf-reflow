@@ -361,6 +361,28 @@ def _line_bold_score(line: "Line") -> float:
     return bold / total if total else 0.0
 
 
+# CJK opening brackets / quotes that typesetters hang outside the
+# column edge. A line beginning with one of these has an x0 that sits
+# several points to the LEFT of the real column-left margin, so it
+# must NOT count toward the column-edge estimate used by the
+# paragraph-indent heuristic in ``_group_blocks``.
+_HANGING_OPEN_PUNCT = frozenset(
+    "（「『【〈《｛〔｟⟨"
+    "“‘"  # “ ‘
+)
+
+
+def _line_starts_with_hanging_punct(line: "Line") -> bool:
+    """True when the first non-whitespace char of ``line`` is a CJK
+    opening bracket / quote that hangs into the left margin."""
+    for s in line.spans:
+        for c in s.text:
+            if c.isspace():
+                continue
+            return c in _HANGING_OPEN_PUNCT
+    return False
+
+
 def _group_lines(spans: List[Span]) -> List[Line]:
     """Group spans into lines by baseline-y proximity."""
     if not spans:
@@ -476,7 +498,16 @@ def _group_blocks(lines: List[Line], page_index: int, body_size: float = 10.0) -
         # indent appears on numbered list items like ``1) US letter
         # margins``. Without this rule, all paragraphs inside a section
         # fuse into one body block and the list items disappear.
-        min_x0 = min(l.bbox[0] for l in current)
+        # Hanging punctuation: CJK typography lets opening brackets
+        # (（「『【〈《｛〔) sit outside the column edge, so a line that
+        # starts with one has x0 several points to the LEFT of the
+        # real column edge. Excluding those lines from the column-edge
+        # estimate keeps a genuine continuation line from looking
+        # paragraph-indented by comparison.
+        non_hanging = [l for l in current
+                       if not _line_starts_with_hanging_punct(l)]
+        ref_lines = non_hanging or current
+        min_x0 = min(l.bbox[0] for l in ref_lines)
         cur_para_indent = (
             ln.bbox[0] - min_x0 > 4.0
             and len(current) >= 1
