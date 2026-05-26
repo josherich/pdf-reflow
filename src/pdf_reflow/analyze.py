@@ -513,6 +513,16 @@ def _detect_columns_from_spans(spans: List[Span], page_width: float) -> Tuple[in
     right_left_edge = min(s.x0 for s in right)
     if right_left_edge - left_right_edge < 6:
         return 1, page_width / 2
+    # Reject when a substantial number of body spans CROSS the candidate
+    # gutter — a true two-column layout has very few such spans (just
+    # full-width titles or page-spanning figure captions). Single-column
+    # documents with frequent inline font switches (italic titles,
+    # inline CJK glosses) produce many narrow fragments on each side
+    # AND many wide single spans that span the whole content width;
+    # the second population is the tell.
+    straddling = sum(1 for s in body if s.x0 < mid - 4 and s.x1 > mid + 4)
+    if straddling > 0.25 * len(body):
+        return 1, page_width / 2
     # Refine mid to sit in the gutter.
     mid = (left_right_edge + right_left_edge) / 2
     return 2, mid

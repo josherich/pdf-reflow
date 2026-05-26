@@ -13,6 +13,7 @@ from typing import Dict, List, Optional, Tuple
 
 import fitz
 
+from .cjk_fonts import font_entry_for_fontname
 from .layout import DrawImage, DrawRule, DrawText, LaidOutPage, LayoutConfig
 
 
@@ -33,7 +34,21 @@ _FONT_ALIASES = {
 }
 
 
+def _insert_text_args(name: str) -> dict:
+    """Build the keyword arguments needed by ``Page.insert_text`` for ``name``.
+
+    For base14 + bundled CID fonts we just remap the short name. For a
+    system CJK font we also forward the ``fontfile`` path so PyMuPDF
+    embeds the right glyphs in the output PDF.
+    """
+    entry = font_entry_for_fontname(name)
+    if entry is not None and entry.fontfile is not None:
+        return {"fontname": entry.fontname, "fontfile": entry.fontfile}
+    return {"fontname": _FONT_ALIASES.get(name, name)}
+
+
 def _alias(name: str) -> str:
+    """Back-compat shim for callers that just want the base14 short name."""
     return _FONT_ALIASES.get(name, name)
 
 
@@ -131,14 +146,25 @@ def render(
     out = fitz.open()
     for lop in pages:
         page = out.new_page(width=lop.width, height=lop.height)
+        # Track system CJK fonts already registered on this page so we
+        # only embed each fontfile once per page — repeated insert_text
+        # calls with fontfile= would otherwise add duplicate font
+        # resources to the page's resource dict.
+        page_cjk_fonts: set = set()
         for op in lop.ops:
             if isinstance(op, DrawText):
+                args = _insert_text_args(op.font)
+                fontfile = args.pop("fontfile", None)
+                fontname = args["fontname"]
+                if fontfile is not None and fontname not in page_cjk_fonts:
+                    page.insert_font(fontname=fontname, fontfile=fontfile)
+                    page_cjk_fonts.add(fontname)
                 page.insert_text(
                     point=(op.x, op.y),
                     text=op.text,
-                    fontname=_alias(op.font),
                     fontsize=op.size,
                     color=op.color,
+                    **args,
                 )
             elif isinstance(op, DrawImage):
                 scale = _figure_scale(op, cfg)

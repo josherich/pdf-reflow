@@ -16,6 +16,14 @@ from typing import List, Optional, Tuple
 import fitz
 
 from .analyze import FlowItem, _parse_toc_entry
+from .cjk_fonts import (
+    SCRIPT_HAN,
+    SCRIPT_JAPAN,
+    SCRIPT_KOREA,
+    STORE as _CJK_STORE,
+    font_entry_for_fontname,
+    fontname_for_script,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -125,16 +133,19 @@ class FontMetrics:
     as a Python-side sum. For base14 fonts this is exact — MuPDF reports
     the same per-glyph advances and there is no kerning table to apply.
 
-    CJK fonts are special-cased: PyMuPDF's ``insert_text`` with a CJK
-    CID font draws every char (including Latin and spaces) at the
-    fullwidth advance (1 em = fontsize), but ``Font.text_length`` for
-    the same font reports proportional widths that don't match what
-    gets drawn. We therefore measure CJK fonts as ``len(text) * size``
-    so wrap boundaries line up with what actually renders.
+    CJK fonts come in two flavors:
+      * Bundled PyMuPDF CID fonts (``china-s`` / ``japan`` / ``korea``)
+        — ``insert_text`` draws every glyph at fullwidth (1 em) regardless
+        of the real advance, so width must be ``len(text) * size``.
+      * System TTF/OTF fonts (Noto Sans CJK, PingFang, Microsoft YaHei,
+        …) — glyph widths are proportional and ``Font.text_length`` is
+        accurate. Loaded via ``fitz.Font(fontfile=path)`` so we route
+        widths through the actual font.
+    The right strategy is picked from the CJK font store at measure time.
     """
 
-    _CJK_FONTS = frozenset({"china-s", "china-t", "japan", "korea",
-                            "china-ss", "china-ts", "japan-s", "korea-s"})
+    _BUNDLED_CJK = frozenset({"china-s", "china-t", "japan", "korea",
+                              "china-ss", "china-ts", "japan-s", "korea-s"})
 
     _cache: dict = {}
     # (font_name) -> {chr: advance_at_size_1.0}
@@ -146,7 +157,12 @@ class FontMetrics:
     def font(cls, name: str) -> fitz.Font:
         f = cls._cache.get(name)
         if f is None:
-            f = fitz.Font(name)
+            entry = font_entry_for_fontname(name)
+            if entry is not None and entry.fontfile is not None:
+                # System CJK font — load by file path.
+                f = fitz.Font(fontfile=entry.fontfile)
+            else:
+                f = fitz.Font(name)
             cls._cache[name] = f
         return f
 
@@ -172,7 +188,10 @@ class FontMetrics:
     def width(cls, font_name: str, text: str, size: float) -> float:
         if not text:
             return 0.0
-        if font_name in cls._CJK_FONTS:
+        # Bundled CJK CID fonts: PyMuPDF's insert_text draws every glyph
+        # at fullwidth regardless of the real advance, so width must
+        # match — otherwise wrap boundaries don't line up with rendering.
+        if font_name in cls._BUNDLED_CJK:
             return len(text) * size
         t = cls._char_widths(font_name)
         total = 0.0
@@ -228,51 +247,61 @@ def _is_cjk_char(c: str) -> bool:
     )
 
 
-def _cjk_font_for_char(c: str) -> Optional[str]:
-    """Pick the built-in CJK font that covers ``c``.
-
-    Returns None when ``c`` is not a CJK codepoint — Latin text should keep
-    its requested base14 font.
-    """
+def _cjk_script_for_char(c: str) -> Optional[str]:
+    """Pick the CJK script that owns ``c`` (or None for non-CJK)."""
     if not c:
         return None
     o = ord(c)
     if 0x3040 <= o <= 0x30FF:
-        return "japan"
+        return SCRIPT_JAPAN
     if 0xAC00 <= o <= 0xD7AF or 0x1100 <= o <= 0x11FF or 0x3130 <= o <= 0x318F:
-        return "korea"
+        return SCRIPT_KOREA
     if _is_cjk_char(c):
-        # Han / CJK punctuation / halfwidth-fullwidth: china-s covers the
-        # broadest character set so we use it as the Han default.
-        return "china-s"
+        # Han / CJK punctuation / halfwidth-fullwidth → Chinese by default.
+        return SCRIPT_HAN
     return None
 
 
+def _cjk_font_for_char(c: str) -> Optional[str]:
+    """Return the *concrete fontname* used to render ``c``.
+
+    None when ``c`` is not CJK — the caller keeps its requested base14
+    font. Concrete fontname comes from the CJK font store, so it may be
+    a bundled name (``china-s``) or a system-resolved name (e.g.
+    ``NotoSansCJK-SC``).
+    """
+    script = _cjk_script_for_char(c)
+    if script is None:
+        return None
+    return fontname_for_script(script)
+
+
 def _dominant_cjk_font(text: str) -> Optional[str]:
-    """Pick a single CJK font for a run of mixed text.
+    """Pick a single concrete CJK fontname for a run of mixed text.
 
     Used when we must commit to one fontname for an entire line draw call.
-    Hiragana/Katakana presence wins (only ``japan`` covers them); else
-    Hangul wins (only ``korea`` covers it); else any Han glyph falls back
-    to ``china-s``. Returns None if the text contains no CJK at all.
+    Kana presence wins (only the Japanese font reliably covers them);
+    else Hangul wins (only the Korean font reliably covers it); else any
+    Han glyph falls back to the Han font. Returns None if the text
+    contains no CJK at all.
     """
     has_kana = False
     has_hangul = False
     has_han = False
     for c in text:
-        font = _cjk_font_for_char(c)
-        if font == "japan":
+        script = _cjk_script_for_char(c)
+        if script == SCRIPT_JAPAN:
             has_kana = True
-        elif font == "korea":
+        elif script == SCRIPT_KOREA:
             has_hangul = True
-        elif font == "china-s":
+        elif script == SCRIPT_HAN:
             has_han = True
     if has_kana:
-        return "japan"
+        return fontname_for_script(SCRIPT_JAPAN)
     if has_hangul:
-        return "korea"
+        return fontname_for_script(SCRIPT_KOREA)
     if has_han:
-        return "china-s"
+        return fontname_for_script(SCRIPT_HAN)
     return None
 
 
@@ -293,32 +322,40 @@ def _pick_font(base_font: str, text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _tokenize_for_wrap(text: str) -> List[str]:
-    """Tokenize ``text`` into wrap-atomic units.
+def _tokenize_for_wrap(text: str) -> List[Tuple[str, bool]]:
+    """Tokenize ``text`` into ``(token, had_leading_whitespace)`` pairs.
 
     Latin words stay grouped (no breaks inside a word). Each CJK char is
     its own token because CJK lines wrap at any character boundary —
     there are no inter-character spaces to use as break opportunities.
-    Whitespace is dropped: ``_wrap_paragraph`` reintroduces a single
-    separator space only between two Latin tokens.
+    Whitespace in the source is collapsed and lifted into the boolean
+    flag, so the wrapper can faithfully reproduce ``詩經 Shījīng``
+    (Han + space + transcription) but elide gaps inside a pure CJK run.
     """
-    tokens: List[str] = []
+    tokens: List[Tuple[str, bool]] = []
     buf: List[str] = []
+    pending_ws = False
 
     def flush_buf():
+        nonlocal pending_ws
         if not buf:
             return
-        # The Latin buffer may itself contain runs of whitespace from the
-        # source (e.g. tab-indented prose); ``split`` normalises them.
-        tokens.extend("".join(buf).split())
+        # Defensive: split on any whitespace that may have slipped into
+        # the Latin buffer (shouldn't happen — we drain on whitespace).
+        words = "".join(buf).split()
+        for i, w in enumerate(words):
+            tokens.append((w, pending_ws if i == 0 else True))
         buf.clear()
+        pending_ws = False
 
     for ch in text:
         if _is_cjk_char(ch):
             flush_buf()
-            tokens.append(ch)
+            tokens.append((ch, pending_ws))
+            pending_ws = False
         elif ch.isspace():
             flush_buf()
+            pending_ws = True
         else:
             buf.append(ch)
     flush_buf()
@@ -339,16 +376,12 @@ def _wrap_paragraph(
     cur_width = 0.0
     space_w = FontMetrics.width(font, " ", size)
 
-    def needs_sep(prev_token: str, next_token: str) -> bool:
-        # No space across a CJK / non-CJK boundary, and no space inside
-        # a CJK run. Only Latin-to-Latin gets a separator.
-        if _is_cjk_char(prev_token[-1]) or _is_cjk_char(next_token[0]):
-            return False
-        return True
-
-    for tok in tokens:
+    for tok, had_ws in tokens:
         tw = FontMetrics.width(font, tok, size)
-        sep = needs_sep(cur[-1], tok) if cur else False
+        # Preserve source whitespace: include a separator only when the
+        # source had one. This keeps inline ``詩經 Shījīng`` spaced
+        # while still letting two CJK chars sit flush.
+        sep = bool(cur) and had_ws
         sep_w = space_w if sep else 0.0
         if tw > max_width and not cur:
             for chunk in _break_oversize_word(tok, font, size, max_width):
