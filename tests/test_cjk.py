@@ -647,6 +647,23 @@ class CJKLineJoinTests(unittest.TestCase):
         # Cheap sanity check that the fixture was actually consumed.
         self.assertGreaterEqual(self.out_doc.page_count, 10)
 
+    def test_no_compatibility_ideographs_in_output_text(self):
+        """Regression: embedding the system Droid Sans Fallback TTF for
+        Han text broke extraction fidelity — its cmap maps a CJK Unified
+        Ideograph and its Compatibility Ideograph twin (力 U+529B /
+        U+F98A) to one glyph, and the reverse mapping MuPDF derives on
+        save picks the compatibility codepoint. The source contains no
+        compatibility ideographs, so the reflowed output must not
+        either."""
+        leaked = sorted({
+            c for c in self.text if 0xF900 <= ord(c) <= 0xFAFF
+        })
+        self.assertEqual(
+            leaked, [],
+            "compatibility ideographs leaked into extracted text: "
+            f"{[hex(ord(c)) for c in leaked]}",
+        )
+
     def test_paragraph_not_split_at_hanging_punct_line(self):
         """Regression: source page 0 has a 3-line paragraph whose
         middle line starts with the fullwidth opening paren ``（`` —

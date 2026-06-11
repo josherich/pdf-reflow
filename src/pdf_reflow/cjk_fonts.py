@@ -165,8 +165,14 @@ _LINUX: Dict[str, List[Tuple[str, str]]] = {
         ("NotoSansSC", "/usr/share/fonts/opentype/noto/NotoSansSC-Regular.otf"),
         ("WQYZenHei", "/usr/share/fonts/wenquanyi/wqy-zenhei/wqy-zenhei.ttc"),
         ("WQYMicroHei", "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc"),
-        ("DroidSansFallback",
-         "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"),
+        # NOTE: Droid Sans Fallback is deliberately NOT probed here even
+        # though many distros ship it. MuPDF already bundles the same
+        # typeface as the ``china-s`` CID font, and embedding the system
+        # TTF breaks text-extraction fidelity: its cmap maps both a CJK
+        # Unified Ideograph and its Compatibility Ideograph twin (e.g.
+        # U+529B 力 / U+F98A) to one glyph, and the reverse mapping MuPDF
+        # derives on save picks the compatibility codepoint — so text
+        # copied out of the reflowed PDF comes back subtly wrong.
     ],
     SCRIPT_JAPAN: [
         ("NotoSansCJK-JP", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),

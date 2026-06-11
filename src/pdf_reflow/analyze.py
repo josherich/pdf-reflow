@@ -101,6 +101,7 @@ class FlowItem:
     align: str = "left"                 # 'left' | 'center' — preserves centered headings/captions
     indent: float = 0.0                 # for 'toc': source-pt indent of the entry relative to the block column
     family: str = "serif"               # 'serif' | 'sans' — mirrors source typeface for output
+    column: int = 0                     # source column / reading-order lane the item came from
 
 
 # Font-name prefixes that identify math-only glyph fonts. LaTeX's
@@ -221,14 +222,35 @@ def _split_runin_subheading_line(line: "Line") -> List["Line"]:
     ]
 
 
-# Numbered reference list items: '[1] G. Eason ...', '[12] ...'. Each new
-# item must start its own block so wrapped continuation lines stay with
-# the right item and the rendered output reads as a vertical list.
-_LIST_ITEM_RE = re.compile(r"^\s*\[\d+\]\s")
+# Numbered reference list items: '[1] G. Eason ...', '[12] ...', and
+# bulleted list items: '• BrowseComp: ...'. Each new item must start its
+# own block so wrapped continuation lines stay with the right item and
+# the rendered output reads as a vertical list.
+_LIST_ITEM_RE = re.compile(r"^\s*(?:\[\d+\]|[•◦▪‣])\s")
 
 
 def _line_starts_list_item(line: "Line") -> bool:
     return bool(_LIST_ITEM_RE.match(line.text))
+
+
+# Hanging-indent list markers: the marker ('[12]', '•', '3.', '7)') sits
+# to the LEFT of the item's text column, so every wrapped continuation
+# line of the item starts a few points right of the block's min-x0 and
+# would otherwise look like an indented new-paragraph start.
+_HANGING_MARKER_SPAN_RE = re.compile(r"^(?:\[\d+\]|[•◦▪‣]|\d{1,3}[.)])$")
+
+
+def _hanging_marker_text_x0(line: "Line") -> Optional[float]:
+    """If ``line`` opens a hanging-indent list item whose marker is its
+    own span ('[44]' / '•' / '3.'), return the x0 where the item's TEXT
+    column starts (the second span). Continuation lines of the item wrap
+    to that text column, not to the marker's x0, so the paragraph-indent
+    heuristic must measure against it."""
+    if len(line.spans) < 2:
+        return None
+    if _HANGING_MARKER_SPAN_RE.match(line.spans[0].text.strip()):
+        return line.spans[1].x0
+    return None
 
 
 # Table-of-contents entry: any line that ends with a dot leader (".....")
@@ -508,9 +530,20 @@ def _group_blocks(lines: List[Line], page_index: int, body_size: float = 10.0) -
                        if not _line_starts_with_hanging_punct(l)]
         ref_lines = non_hanging or current
         min_x0 = min(l.bbox[0] for l in ref_lines)
+        # Hanging-indent list items ('[44] Some reference…', '• Bullet…')
+        # put their marker left of the text column, so genuine wrap
+        # continuations start right of min_x0 and would read as indented
+        # paragraph starts. Measure those lines against the item's text
+        # column instead.
+        hang_text_x0 = _hanging_marker_text_x0(current[0])
+        is_hanging_continuation = (
+            hang_text_x0 is not None
+            and abs(ln.bbox[0] - hang_text_x0) <= 3.0
+        )
         cur_para_indent = (
             ln.bbox[0] - min_x0 > 4.0
             and len(current) >= 1
+            and not is_hanging_continuation
             # Only break for plausible body-text indents, not centered
             # display equations or random horizontally shifted lines.
             and not cur_math
@@ -535,6 +568,34 @@ def _group_blocks(lines: List[Line], page_index: int, body_size: float = 10.0) -
     return blocks
 
 
+def _multi_cluster_baseline_fraction(body: List[Span]) -> float:
+    """Fraction of baselines whose body spans form 3+ horizontal text
+    clusters (runs separated by gaps wider than ~2.5 em).
+
+    A genuine two-column text page has at most two clusters per
+    baseline — one per column — because words within a column line are
+    separated only by ordinary word spaces. Tables and multi-column
+    name lists (e.g. a paper's Contributions page) instead place 3+
+    distinct cell runs on each row, so a high multi-cluster fraction is
+    a strong "this is a table, not a two-column layout" signal.
+    """
+    rows: dict = {}
+    for s in body:
+        rows.setdefault(round((s.y0 + s.y1) / 4) * 4, []).append(s)
+    if not rows:
+        return 0.0
+    multi = 0
+    for ss in rows.values():
+        ss.sort(key=lambda s: s.x0)
+        clusters = 1
+        for a, b in zip(ss, ss[1:]):
+            if b.x0 - a.x1 > 2.5 * max(a.size, b.size):
+                clusters += 1
+        if clusters >= 3:
+            multi += 1
+    return multi / len(rows)
+
+
 def _detect_columns_from_spans(spans: List[Span], page_width: float) -> Tuple[int, float]:
     """Detect column count from raw spans BEFORE line grouping.
 
@@ -546,11 +607,21 @@ def _detect_columns_from_spans(spans: List[Span], page_width: float) -> Tuple[in
     population sits on each side of the page mid AND the gap between the
     rightmost left-side edge and the leftmost right-side edge is wide
     enough to be a gutter, declare two columns.
+
+    All weighting is char-based, not span-count-based. Span counts are
+    dominated by whichever content happens to be most fragmented — a
+    vector figure's two dozen short labels can outnumber the page's
+    body-paragraph spans (bitcoin.pdf p2), and a CJK paragraph is often
+    one wide span per line while a diagram contributes many narrow
+    ones. Char weighting keeps the actual prose in charge of both the
+    body-size estimate and the straddle test.
     """
     if not spans:
         return 1, page_width / 2
-    sizes = Counter(round(s.size, 1) for s in spans)
-    body_size = sizes.most_common(1)[0][0]
+    char_sizes: Counter = Counter()
+    for s in spans:
+        char_sizes[round(s.size, 1)] += max(1, len(s.text))
+    body_size = char_sizes.most_common(1)[0][0]
     body = [s for s in spans if abs(s.size - body_size) < 0.5]
     if len(body) < 20:
         return 1, page_width / 2
@@ -564,15 +635,23 @@ def _detect_columns_from_spans(spans: List[Span], page_width: float) -> Tuple[in
     right_left_edge = min(s.x0 for s in right)
     if right_left_edge - left_right_edge < 6:
         return 1, page_width / 2
-    # Reject when a substantial number of body spans CROSS the candidate
+    # Reject when a substantial amount of body TEXT crosses the candidate
     # gutter — a true two-column layout has very few such spans (just
-    # full-width titles or page-spanning figure captions). Single-column
-    # documents with frequent inline font switches (italic titles,
-    # inline CJK glosses) produce many narrow fragments on each side
-    # AND many wide single spans that span the whole content width;
-    # the second population is the tell.
-    straddling = sum(1 for s in body if s.x0 < mid - 4 and s.x1 > mid + 4)
-    if straddling > 0.25 * len(body):
+    # full-width titles or page-spanning figure captions). Weighted by
+    # chars: a single-column CJK page wraps each body line as one wide
+    # span, so a handful of straddling spans carry most of the page's
+    # text even though they are outnumbered by narrow fragments.
+    body_chars = sum(max(1, len(s.text)) for s in body)
+    straddle_chars = sum(
+        max(1, len(s.text)) for s in body if s.x0 < mid - 4 and s.x1 > mid + 4
+    )
+    if straddle_chars > 0.25 * body_chars:
+        return 1, page_width / 2
+    # Reject tables and multi-column name lists: their rows happen to
+    # leave a clear channel near the page mid (so the straddle test
+    # passes) but place 3+ separate cell runs on most baselines, which
+    # never happens in real two-column prose.
+    if _multi_cluster_baseline_fraction(body) > 0.2:
         return 1, page_width / 2
     # Refine mid to sit in the gutter.
     mid = (left_right_edge + right_left_edge) / 2
@@ -1213,7 +1292,7 @@ def _analyze_two_column(
                             min(x_hi, b.bbox[2] + 4), b.bbox[3] + 2)
                 items_with_key.append((sort_col, b.bbox[1], 0, FlowItem(
                     kind="figure", page_index=page.index,
-                    bbox=b.bbox, source_rect=src_rect)))
+                    bbox=b.bbox, source_rect=src_rect, column=sort_col)))
                 continue
             if b.kind == "code":
                 code_lines = [ln.text.rstrip() for ln in b.lines]
@@ -1221,12 +1300,12 @@ def _analyze_two_column(
                     kind="code", page_index=page.index, bbox=b.bbox,
                     text="\n".join(code_lines), size=b.size, bold=b.bold,
                     italic=b.italic, monospace=True, code_lines=code_lines,
-                    align=b.align, family=b.family)))
+                    align=b.align, family=b.family, column=sort_col)))
                 continue
             items_with_key.append((sort_col, b.bbox[1], 0, FlowItem(
                 kind=b.kind, page_index=page.index, bbox=b.bbox,
                 text=b.text, size=b.size, bold=b.bold, italic=b.italic,
-                align=b.align, family=b.family)))
+                align=b.align, family=b.family, column=sort_col)))
         # Figures cropped to the column.
         for (y0, y1) in fig_bands:
             x_extents: List[Tuple[float, float]] = []
@@ -1266,7 +1345,8 @@ def _analyze_two_column(
             src_rect = (fx0, y0 - 2, fx1, y1 + 2)
             items_with_key.append((sort_col, y0, 0, FlowItem(
                 kind="figure", page_index=page.index,
-                bbox=(fx0, y0, fx1, y1), source_rect=src_rect)))
+                bbox=(fx0, y0, fx1, y1), source_rect=src_rect,
+                column=sort_col)))
 
     # Full-width header items: any full-width block whose center y is
     # above the two-column band start.
@@ -1284,7 +1364,7 @@ def _analyze_two_column(
         items_with_key.append((sort_col, b.bbox[1], 0, FlowItem(
             kind=b.kind, page_index=page.index, bbox=b.bbox,
             text=b.text, size=b.size, bold=b.bold, italic=b.italic,
-            align=b.align, family=b.family)))
+            align=b.align, family=b.family, column=sort_col)))
 
     # Full-width figure bands.
     for (y0, y1) in full_bands:
@@ -1293,7 +1373,7 @@ def _analyze_two_column(
         items_with_key.append((sort_col, y0, 0, FlowItem(
             kind="figure", page_index=page.index,
             bbox=(page_margin, y0, page.width - page_margin, y1),
-            source_rect=src_rect)))
+            source_rect=src_rect, column=sort_col)))
 
     emit_block_items(left_blocks, left_bands, left_ext, sort_col=1)
     emit_block_items(right_blocks, right_bands, right_ext, sort_col=2)
@@ -1382,6 +1462,7 @@ def analyze_page(page: PageContent, body_size: float) -> List[FlowItem]:
                 page_index=page.index,
                 bbox=b.bbox,
                 source_rect=src_rect,
+                column=b.column,
             )
             items_with_y.append((b.column, b.bbox[1], item))
             continue
@@ -1400,6 +1481,7 @@ def analyze_page(page: PageContent, body_size: float) -> List[FlowItem]:
                 code_lines=code_lines,
                 align=b.align,
                 family=b.family,
+                column=b.column,
             )
             items_with_y.append((b.column, b.bbox[1], item))
             continue
@@ -1415,6 +1497,7 @@ def analyze_page(page: PageContent, body_size: float) -> List[FlowItem]:
             align=b.align,
             indent=indent,
             family=b.family,
+            column=b.column,
         )
         items_with_y.append((b.column, b.bbox[1], item))
 
@@ -1477,9 +1560,108 @@ def body_font_size(pages: List[PageContent]) -> float:
     return counter.most_common(1)[0][0]
 
 
+# Characters that legitimately end a paragraph. A body block whose text
+# ends with one of these is treated as complete; anything else suggests
+# the paragraph was cut mid-sentence by a column or page boundary.
+_TERMINAL_CHARS = frozenset(
+    ".!?:;"
+    "。．！？；：…"
+    "\"'”’»"
+    ")]}）】》」』"
+)
+
+
+def _ends_open(text: str) -> bool:
+    """True when ``text`` ends mid-sentence (no terminal punctuation)."""
+    if not text:
+        return False
+    return text[-1] not in _TERMINAL_CHARS
+
+
+def _items_continue(prev: FlowItem, cur: FlowItem) -> bool:
+    """Do ``prev`` and ``cur`` look like two halves of one paragraph that
+    was cut by a column or page boundary?
+
+    Both must be left-aligned body items with matching style, must come
+    from *different* reading-order lanes (another column or another
+    source page — blocks split within one column were split on purpose,
+    e.g. by the paragraph-indent rule), and the text must read as a
+    continuation: prev ends mid-sentence and cur starts with a lowercase
+    Latin letter, or both sides of the cut are CJK.
+    """
+    if prev.kind != "body" or cur.kind != "body":
+        return False
+    if prev.align != "left" or cur.align != "left":
+        return False
+    if not prev.text or not cur.text:
+        return False
+    if prev.bold != cur.bold or prev.italic != cur.italic:
+        return False
+    if prev.family != cur.family:
+        return False
+    if abs(prev.size - cur.size) > 1.0:
+        return False
+    # Same page AND same column → the analyzer split these blocks
+    # deliberately; never re-fuse them.
+    if prev.page_index == cur.page_index and prev.column == cur.column:
+        return False
+    if not _ends_open(prev.text):
+        return False
+    first = cur.text[0]
+    if first.isalpha() and first.islower():
+        return True
+    # CJK paragraphs wrap at arbitrary char boundaries with no case
+    # signal; treat CJK→CJK across a boundary as continuation when prev
+    # didn't end the sentence.
+    if _is_cjk_char(prev.text[-1]) and _is_cjk_char(first):
+        return True
+    return False
+
+
+def _join_continuation_text(prev_text: str, cur_text: str) -> str:
+    """Join two paragraph halves, undoing end-of-column hyphenation.
+
+    Mirrors the intra-block line-join rules in ``Block.text``: a
+    hyphenated word is fused (``informa-`` + ``tion`` → ``information``)
+    when the continuation starts lowercase; an explicit compound hyphen
+    before an uppercase continuation (``Megatron-`` + ``LM``) is kept;
+    CJK joins flush with no inserted space.
+    """
+    if (
+        prev_text.endswith("-")
+        and len(prev_text) > 1
+        and prev_text[-2].isalpha()
+    ):
+        if cur_text[:1].islower():
+            return prev_text[:-1] + cur_text
+        return prev_text + cur_text
+    if _is_cjk_char(prev_text[-1]) and _is_cjk_char(cur_text[0]):
+        return prev_text + cur_text
+    return prev_text + " " + cur_text
+
+
+def _merge_continuation_items(items: List[FlowItem]) -> List[FlowItem]:
+    """Fuse body paragraphs that source column/page boundaries cut in two.
+
+    Without this, every paragraph straddling a column break or page break
+    becomes two FlowItems and the layout renders a spurious paragraph
+    break (new line + paragraph spacing) mid-sentence — often splitting a
+    hyphenated word across the break. Only adjacent body items are fused
+    so reading order is never altered.
+    """
+    out: List[FlowItem] = []
+    for it in items:
+        if out and _items_continue(out[-1], it):
+            prev = out[-1]
+            prev.text = _join_continuation_text(prev.text, it.text)
+            continue
+        out.append(it)
+    return out
+
+
 def analyze_document(pages: List[PageContent]) -> Tuple[List[FlowItem], float]:
     body_size = body_font_size(pages)
     all_items: List[FlowItem] = []
     for p in pages:
         all_items.extend(analyze_page(p, body_size))
-    return all_items, body_size
+    return _merge_continuation_items(all_items), body_size
