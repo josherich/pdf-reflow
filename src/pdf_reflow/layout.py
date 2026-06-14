@@ -27,6 +27,16 @@ from .cjk_fonts import (
     fontname_for_script,
     is_cjk_char as _is_cjk_char,
 )
+from .knuth_plass import (
+    INF as _KP_INF,
+    Box as _KPBox,
+    BreakParams as _KPParams,
+    Glue as _KPGlue,
+    Penalty as _KPPenalty,
+    add_final_break as _kp_add_final_break,
+    break_lines as _kp_break_lines,
+)
+from .linebreak import Sep as _Sep, segments as _uax14_segments
 
 
 # ---------------------------------------------------------------------------
@@ -520,50 +530,103 @@ def _tokenize_for_wrap(text: str) -> List[Tuple[str, bool]]:
     return tokens
 
 
+# Penalty (in Knuth-Plass demerit units) added when a line breaks right
+# after a hyphen, so the optimiser only hyphenates when it visibly
+# improves the paragraph and avoids stacks of hyphenated lines.
+_HYPHEN_PENALTY = 50.0
+
+
 def _wrap_paragraph(
     text: str,
     font: str,
     size: float,
     max_width: float,
 ) -> List[str]:
-    """Wrap ``text`` to ``max_width`` using per-char font fallback off
-    ``font`` for width measurement. ``font`` is the paragraph's *base*
-    font; individual CJK chars and Latin-extended glyphs are measured
-    against their resolved fallback so the wrap boundaries line up
-    with what ``emit_text_line`` ends up drawing."""
-    tokens = _tokenize_for_wrap(text)
-    if not tokens:
-        return []
-    lines: List[str] = []
-    cur: List[str] = []      # alternating tokens + " " separators as added
-    cur_width = 0.0
-    # Whitespace renders in the base font (covered by base14 WinAnsi).
-    space_w = FontMetrics.width(font, " ", size)
+    """Wrap ``text`` to ``max_width`` with Unicode-aware, optimal breaks.
 
-    for tok, had_ws in tokens:
-        tw = _multifont_width(tok, font, size)
-        # Preserve source whitespace: include a separator only when the
-        # source had one. This keeps inline ``詩經 Shījīng`` spaced
-        # while still letting two CJK chars sit flush.
-        sep = bool(cur) and had_ws
-        sep_w = space_w if sep else 0.0
-        if tw > max_width and not cur:
-            for chunk in _break_oversize_word(tok, font, size, max_width):
-                lines.append(chunk)
-            cur_width = 0.0
-            continue
-        proposed = cur_width + sep_w + tw
-        if proposed <= max_width or not cur:
-            if sep:
-                cur.append(" ")
-            cur.append(tok)
-            cur_width = proposed
+    Break opportunities come from the Unicode line breaking algorithm
+    (UAX #14, what ICU implements): after spaces and hyphens, between
+    ideographs, around slashes / em-dashes, while never orphaning closing
+    punctuation. The chosen break points are then selected by the
+    Knuth-Plass total-fit algorithm so the right margin is as even as
+    possible rather than greedily ragged.
+
+    Width is measured with per-char font fallback off ``font`` (the
+    paragraph's *base* font), so wrap boundaries line up exactly with what
+    ``emit_text_line`` draws. ``font`` covers ASCII; CJK chars and
+    Latin-extended glyphs are measured against their resolved fallback.
+    """
+    if not text:
+        return []
+    boxes, seps = _uax14_segments(text)
+    if not boxes or (len(boxes) == 1 and boxes[0] == ""):
+        return []
+    # Single unbreakable run: emit as-is, or force-break if it overflows.
+    if len(seps) == 0:
+        only = boxes[0]
+        if _multifont_width(only, font, size) <= max_width:
+            return [only]
+        return _break_oversize_word(only, font, size, max_width)
+
+    space_w = FontMetrics.width(font, " ", size)
+    stretch = max(space_w * 3.0, 1.0)
+
+    # Build the Knuth-Plass item stream (Box / Glue / Penalty) alongside a
+    # parallel ``pieces`` list used to rebuild line text from the chosen
+    # breakpoints. The two lists are index-aligned.
+    pieces: List[Tuple[str, object]] = []   # ('box', text) | ('sep', Sep)
+    items: List[object] = []
+
+    def add_box(t: str) -> None:
+        w = _multifont_width(t, font, size)
+        if w > max_width and len(t) > 1:
+            # No legal break inside this run but it overflows the column;
+            # fall back to character chunking (an "emergency" break) and
+            # let the optimiser break between the chunks.
+            chunks = _break_oversize_word(t, font, size, max_width)
+            for ci, chunk in enumerate(chunks):
+                if ci > 0:
+                    pieces.append(("sep", _Sep(space=False, hyphen=False,
+                                               mandatory=False)))
+                    items.append(_KPPenalty(0.0, 0.0, False))
+                pieces.append(("box", chunk))
+                items.append(_KPBox(_multifont_width(chunk, font, size)))
         else:
-            lines.append("".join(cur))
-            cur = [tok]
-            cur_width = tw
-    if cur:
-        lines.append("".join(cur))
+            pieces.append(("box", t))
+            items.append(_KPBox(w))
+
+    add_box(boxes[0])
+    for i, sep in enumerate(seps):
+        pieces.append(("sep", sep))
+        if sep.mandatory:
+            items.append(_KPPenalty(0.0, -_KP_INF, False))
+        elif sep.space:
+            items.append(_KPGlue(space_w, stretch, 0.0))
+        else:
+            pen = _HYPHEN_PENALTY if sep.hyphen else 0.0
+            items.append(_KPPenalty(0.0, pen, sep.hyphen))
+        add_box(boxes[i + 1])
+
+    params = _KPParams(default_stretch=stretch)
+    chosen = set(_kp_break_lines(_kp_add_final_break(items), max_width, params))
+
+    lines: List[str] = []
+    cur = ""
+    started = False
+    for idx, (kind, payload) in enumerate(pieces):
+        if kind == "box":
+            if not started:
+                cur = payload
+                started = True
+            else:
+                prev_sep = pieces[idx - 1][1]
+                cur += (" " + payload) if prev_sep.space else payload
+        elif idx in chosen:
+            lines.append(cur)
+            cur = ""
+            started = False
+    if started:
+        lines.append(cur)
     return lines
 
 

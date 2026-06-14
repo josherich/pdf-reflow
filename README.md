@@ -85,8 +85,15 @@ hold up well for technical PDFs.
 5. **Layout & render** (`layout.py`, `render.py`)
    - The target page is sized for a phone (default: 360 × 600 pt, similar
      to iPhone 17 logical bounds at PDF scale).
-   - Text is greedy-wrapped using PyMuPDF's base-14 font metrics
-     (`tiro`, `tibo`, `tiit`, `cour`).
+   - Text is wrapped using PyMuPDF's base-14 font metrics (`tiro`,
+     `tibo`, `tiit`, `cour`). Break opportunities come from a pure-Python
+     implementation of the Unicode line breaking algorithm (UAX #14 —
+     the rule set ICU implements: break after spaces/hyphens, between
+     ideographs, around slashes and em-dashes, never orphaning closing
+     punctuation or splitting a number); the break points themselves are
+     chosen by the Knuth-Plass total-fit algorithm (`linebreak.py`,
+     `knuth_plass.py`) so the right margin is balanced instead of greedily
+     ragged.
    - Figures are clipped from the original page (tightened horizontally to
      the actual content bbox in the band) and rasterized at 220 dpi,
      scaled to fit the column width.
