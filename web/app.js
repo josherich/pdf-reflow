@@ -26,6 +26,8 @@ const PDF_REFLOW_SOURCES = [
   "__init__.py",
   "__main__.py",
   "cjk_fonts.py",
+  "linebreak.py",
+  "knuth_plass.py",
   "extract.py",
   "analyze.py",
   "layout.py",

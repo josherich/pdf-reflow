@@ -20,10 +20,12 @@ There are two parts that have to run in the browser:
 
 2. **The reflow algorithm (everything else).** The five-stage pipeline
    in `extract.py`, `analyze.py`, `layout.py`, `render.py`, and
-   `reflow.py` is pure Python — no native code. We `fetch()` those
-   source files at page load and write them into Pyodide's virtual
-   filesystem under `/pdf_reflow/`. The Python `import pdf_reflow`
-   then resolves against that path.
+   `reflow.py` — plus the pure-Python text engine in `cjk_fonts.py`,
+   `linebreak.py` (Unicode UAX #14 line breaking) and `knuth_plass.py`
+   (optimal line breaking) — is pure Python with no native code. We
+   `fetch()` those source files at page load and write them into
+   Pyodide's virtual filesystem under `/pdf_reflow/`. The Python
+   `import pdf_reflow` then resolves against that path.
 
 The browser calls Python like this:
 
