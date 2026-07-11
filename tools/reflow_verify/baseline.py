@@ -26,7 +26,7 @@ METRIC_RULES: Dict[str, Dict[str, object]] = {
     "w_minus":           {"dir": "down", "tol": 5,    "gate": True},
     "w_tilde":           {"dir": "down", "tol": 5,    "gate": True},
     "w_plus":            {"dir": "down", "tol": 10,   "gate": False},
-    "min_ssim":          {"dir": "up",   "tol": 0.02, "gate": True},
+    "ssim":              {"dir": "up",   "tol": 0.02, "gate": True},
     "output_pages":      {"dir": "flat", "tol": None, "gate": False},
     "widow_lines":       {"dir": "down", "tol": 5,    "gate": False},
     "images_rendered":   {"dir": "flat", "tol": None, "gate": False},

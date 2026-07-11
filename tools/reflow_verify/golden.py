@@ -1,19 +1,21 @@
-"""Layer 2: visual golden snapshots compared with SSIM.
+"""Layer 2: pagination-invariant visual golden compared with SSIM.
 
-A golden is just the last output a human looked at and blessed by committing
-it. Lifecycle:
+A reflow tool re-paginates on almost every meaningful change (a spacing tweak
+pushes a paragraph from the bottom of one page to the top of the next). Page-
+by-page image comparison would then misalign every page after the shift and
+flag a cascade of false regressions -- on exactly the changes this harness
+exists to help you make.
 
-    generate (bootstrap)  ->  human approves once (commit PNGs)
-        ->  auto-compare forever  ->  re-bless on purpose (--update-golden)
+So instead of comparing page N to golden page N, we reconstruct the *continuous
+reflowed column*: crop each output page to its content (dropping page margins
+and the partial-page whitespace at each break) and stack the crops into one
+tall strip. Where the page breaks fall no longer matters -- the strip is the
+same whether a line sits at the bottom of p5 or the top of p6 -- so SSIM only
+drops when the rendering *actually* changes.
 
-We render each output page to a low-DPI PNG. On a normal run we SSIM-compare
-against the committed golden; below ``threshold`` is a visual regression and
-we emit a side-by-side diff into the report. ``update`` overwrites the
-goldens (the git diff of those PNGs is then the review artifact).
-
-Low-DPI grayscale keeps the committed PNGs tiny and lets SSIM shrug off
-anti-aliasing differences between MuPDF builds -- record the MuPDF version so
-a mass failure has an obvious cause.
+A golden is the last strip a human looked at and blessed by committing it.
+Lifecycle unchanged: bootstrap -> approve once -> auto-compare -> re-bless on
+purpose (--update-golden). One small PNG per fixture.
 """
 
 from __future__ import annotations
@@ -24,43 +26,92 @@ from typing import List, Optional
 
 import fitz
 
-from .imaging import GRID, downsample, rasterize_gray, ssim
+from .imaging import (
+    GrayImage,
+    density_map,
+    downsample_to_width,
+    from_pixmap,
+    ssim,
+    to_pixmap,
+    vstack,
+)
 
-# Goldens are only ever fed to SSIM, which downsamples to a ~110-cell grid, so
-# there's no point storing them large. 48 DPI keeps a phone page around
-# 240px (well above the grid), stays visually inspectable, and keeps the
-# committed PNGs small.
-GOLDEN_DPI = 48
-
-
-@dataclass
-class PageResult:
-    page: int
-    score: float
-    golden_png: Optional[str]
-    actual_png: str
-    ok: bool
+# Rasterize page-content clips at this DPI, downsample to STRIP_W columns, then
+# reduce the stitched strip to a DENSITY_W-wide ink-density map for comparison.
+CLIP_DPI = 48
+STRIP_W = 64
+DENSITY_W = 32
 
 
 @dataclass
 class GoldenResult:
     name: str
     threshold: float
-    pages: List[PageResult]
+    score: float
+    golden_png: Optional[str]
+    actual_png: str
+    source_pages: int = 0
     bootstrapped: bool = False
     updated: bool = False
 
     @property
-    def min_score(self) -> float:
-        return min((p.score for p in self.pages), default=1.0)
-
-    @property
     def ok(self) -> bool:
-        return all(p.ok for p in self.pages)
+        return self.score >= self.threshold
+
+    # Back-compat alias: the strip yields a single score per fixture.
+    @property
+    def min_score(self) -> float:
+        return self.score
 
 
 def _stem(name: str) -> str:
     return os.path.splitext(os.path.basename(name))[0]
+
+
+def _page_content_rect(page: "fitz.Page") -> Optional["fitz.Rect"]:
+    """Union of the page's text + image block bboxes (its inked content).
+
+    Horizontal extent is the full content column; vertical extent is just the
+    inked band, so top/bottom page margins and a partial last page don't
+    contribute whitespace to the stitched strip.
+    """
+    rect = None
+    d = page.get_text("dict")
+    for block in d.get("blocks", []):
+        b = fitz.Rect(block["bbox"])
+        rect = b if rect is None else (rect | b)
+    return rect
+
+
+def build_strip(out_pdf: str, clip_dpi: int = CLIP_DPI, strip_w: int = STRIP_W) -> GrayImage:
+    """Stitch an output PDF's margin-cropped page content into one gray strip."""
+    doc = fitz.open(out_pdf)
+    try:
+        # Global horizontal content band, so every page crop shares a width.
+        gx0, gx1 = None, None
+        rects: List[Optional[fitz.Rect]] = []
+        for page in doc:
+            r = _page_content_rect(page)
+            rects.append(r)
+            if r is not None:
+                gx0 = r.x0 if gx0 is None else min(gx0, r.x0)
+                gx1 = r.x1 if gx1 is None else max(gx1, r.x1)
+
+        bands: List[GrayImage] = []
+        for page, r in zip(doc, rects):
+            if r is None or gx0 is None:
+                continue
+            clip = fitz.Rect(gx0, r.y0, gx1, r.y1)
+            if clip.is_empty or clip.width <= 0 or clip.height <= 0:
+                continue
+            pix = page.get_pixmap(dpi=clip_dpi, colorspace=fitz.csGRAY,
+                                  alpha=False, clip=clip)
+            if pix.width == 0 or pix.height == 0:
+                continue
+            bands.append(downsample_to_width(pix, strip_w))
+        return vstack(bands)
+    finally:
+        doc.close()
 
 
 def check_golden(
@@ -71,67 +122,35 @@ def check_golden(
     *,
     threshold: float = 0.97,
     update: bool = False,
-    dpi: int = GOLDEN_DPI,
 ) -> GoldenResult:
-    """SSIM-compare every output page against its golden PNG.
+    """Build the output's content strip and SSIM-compare it to the golden strip.
 
-    When a golden is missing it is bootstrapped (written, scored 1.0). When
-    ``update`` is set every golden is overwritten from the current output.
+    Missing golden => bootstrap (write it, score 1.0). ``update`` => overwrite.
     """
     stem = _stem(name)
     os.makedirs(golden_dir, exist_ok=True)
     os.makedirs(actual_dir, exist_ok=True)
 
+    strip = density_map(build_strip(out_pdf), width=DENSITY_W)
+    actual_png = os.path.join(actual_dir, f"{stem}.png")
+    to_pixmap(strip).save(actual_png)
+
+    golden_png = os.path.join(golden_dir, f"{stem}.png")
     doc = fitz.open(out_pdf)
-    pages: List[PageResult] = []
-    bootstrapped = False
-    updated = False
-    try:
-        for i, page in enumerate(doc):
-            pix = rasterize_gray(page, dpi=dpi)
-            actual_png = os.path.join(actual_dir, f"{stem}_p{i:03d}.png")
-            pix.save(actual_png)
-            actual_grid = downsample(pix, grid=GRID)
+    n_pages = doc.page_count
+    doc.close()
 
-            golden_png = os.path.join(golden_dir, f"{stem}_p{i:03d}.png")
-            if update or not os.path.exists(golden_png):
-                pix.save(golden_png)
-                if update:
-                    updated = True
-                else:
-                    bootstrapped = True
-                pages.append(PageResult(i, 1.0, golden_png, actual_png, True))
-                continue
+    if update or not os.path.exists(golden_png):
+        to_pixmap(strip).save(golden_png)
+        return GoldenResult(
+            name=name, threshold=threshold, score=1.0,
+            golden_png=golden_png, actual_png=actual_png, source_pages=n_pages,
+            bootstrapped=not update, updated=update,
+        )
 
-            gpix = fitz.Pixmap(golden_png)
-            if gpix.colorspace and gpix.colorspace.n != 1:
-                gpix = fitz.Pixmap(fitz.csGRAY, gpix)
-            golden_grid = downsample(gpix, grid=GRID)
-            score = ssim(golden_grid, actual_grid)
-            pages.append(
-                PageResult(i, round(score, 4), golden_png, actual_png, score >= threshold)
-            )
-    finally:
-        doc.close()
-
-    # Goldens for pages that no longer exist (output got shorter) are stale.
-    stem_prefix = f"{stem}_p"
-    live = {os.path.basename(p.golden_png) for p in pages if p.golden_png}
-    for fn in os.listdir(golden_dir):
-        if fn.startswith(stem_prefix) and fn.endswith(".png") and fn not in live:
-            # Missing page => a regression unless we're updating goldens.
-            if update:
-                os.remove(os.path.join(golden_dir, fn))
-                updated = True
-            else:
-                pages.append(
-                    PageResult(-1, 0.0, os.path.join(golden_dir, fn), "", False)
-                )
-
+    golden = from_pixmap(fitz.Pixmap(golden_png))
+    score = ssim(golden, strip)
     return GoldenResult(
-        name=name,
-        threshold=threshold,
-        pages=pages,
-        bootstrapped=bootstrapped,
-        updated=updated,
+        name=name, threshold=threshold, score=round(score, 4),
+        golden_png=golden_png, actual_png=actual_png, source_pages=n_pages,
     )

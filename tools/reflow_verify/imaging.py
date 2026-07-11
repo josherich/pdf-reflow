@@ -77,6 +77,94 @@ def downsample(pix: "fitz.Pixmap", grid: int = GRID) -> GrayImage:
     return GrayImage(ow, oh, out)
 
 
+def downsample_to_width(pix: "fitz.Pixmap", cell_w: int) -> GrayImage:
+    """Box-average a grayscale pixmap to a fixed *width*, height proportional.
+
+    Used to bring every page-content clip onto a common column width before
+    stacking them into one tall strip. Unlike ``downsample`` (which fixes the
+    longer side) this fixes the width, so a tall strip keeps its full height.
+    """
+    sw, sh = pix.width, pix.height
+    samples = pix.samples
+    ow = max(1, cell_w)
+    oh = max(1, round(cell_w * sh / sw))
+    out = [0.0] * (ow * oh)
+    for oy in range(oh):
+        y0 = oy * sh // oh
+        y1 = max(y0 + 1, (oy + 1) * sh // oh)
+        for ox in range(ow):
+            x0 = ox * sw // ow
+            x1 = max(x0 + 1, (ox + 1) * sw // ow)
+            total = 0
+            count = 0
+            for yy in range(y0, y1):
+                base = yy * sw
+                total += sum(samples[base + x0: base + x1])
+                count += (x1 - x0)
+            out[oy * ow + ox] = total / count if count else 0.0
+    return GrayImage(ow, oh, out)
+
+
+def vstack(imgs: List[GrayImage]) -> GrayImage:
+    """Stack same-width grayscale images into one tall column."""
+    imgs = [im for im in imgs if im.h > 0]
+    if not imgs:
+        return GrayImage(1, 1, [255.0])
+    w = imgs[0].w
+    px: List[float] = []
+    h = 0
+    for im in imgs:
+        if im.w != w:  # defensive; strips are built at a common width
+            im = _resize_to(im, w, im.h)
+        px.extend(im.px)
+        h += im.h
+    return GrayImage(w, h, px)
+
+
+def density_map(img: GrayImage, width: int = 32, max_h: int = 200) -> GrayImage:
+    """Reduce a tall strip to a coarse ink-density map.
+
+    Rendered text at strip resolution is effectively high-frequency noise:
+    two independent renderings of the *same* content barely correlate
+    pixel-for-pixel, so SSIM on the raw strip is unusable (~0.5 even when
+    identical). Averaging the strip into coarse cells turns text into a smooth
+    "ink per region" density, which IS stable: identical content maps to an
+    identical density map (SSIM 1.0), a pure pagination shift barely moves it,
+    and a genuine re-layout (different column width, changed spacing) clearly
+    changes it. Height is capped so long documents stay cheap to score.
+    """
+    cw = max(1, width)
+    ch = min(max_h, max(1, round(cw * img.h / img.w)))
+    out = [0.0] * (cw * ch)
+    for oy in range(ch):
+        y0 = oy * img.h // ch
+        y1 = max(y0 + 1, (oy + 1) * img.h // ch)
+        for ox in range(cw):
+            x0 = ox * img.w // cw
+            x1 = max(x0 + 1, (ox + 1) * img.w // cw)
+            total = 0.0
+            count = 0
+            for yy in range(y0, y1):
+                base = yy * img.w
+                total += sum(img.px[base + x0: base + x1])
+                count += (x1 - x0)
+            out[oy * cw + ox] = total / count if count else 0.0
+    return GrayImage(cw, ch, out)
+
+
+def to_pixmap(img: GrayImage) -> "fitz.Pixmap":
+    """Pack a GrayImage into an 8-bit grayscale Pixmap (for saving as PNG)."""
+    data = bytes(max(0, min(255, int(round(v)))) for v in img.px)
+    return fitz.Pixmap(fitz.csGRAY, img.w, img.h, data, 0)
+
+
+def from_pixmap(pix: "fitz.Pixmap") -> GrayImage:
+    """Read a (grayscale) Pixmap into a GrayImage at native resolution."""
+    if pix.colorspace is None or pix.colorspace.n != 1 or pix.alpha:
+        pix = fitz.Pixmap(fitz.csGRAY, pix)
+    return GrayImage(pix.width, pix.height, [float(b) for b in pix.samples])
+
+
 def _resize_to(img: GrayImage, w: int, h: int) -> GrayImage:
     """Nearest-neighbour resize of an already-small grid (for aligning two
     images whose grids differ by a row/column after independent rounding)."""

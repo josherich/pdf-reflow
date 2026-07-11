@@ -230,11 +230,15 @@ uv run python tools/verify.py --update-golden     # golden page images
 It reflows each fixture and, using the *source's own reading-order text as
 ground truth* (reflow must preserve text + order, only geometry changes),
 reports word retention, dropped/spurious/garbled words, heading survival,
-lines clipped by the page edge, private-use-glyph leakage, and a per-page
-SSIM against golden snapshots — failing CI when a gating metric regresses.
-The HTML report shows each source page beside its reflowed page for the
-run → eyeball → adjust → rerun loop. See [`docs/verify.md`](docs/verify.md)
-for the design and how to grow the corpus.
+lines clipped by the page edge, private-use-glyph leakage, and a
+pagination-invariant SSIM of the reflowed column against a golden snapshot —
+failing CI when a gating metric regresses. Because reflow re-paginates, the
+visual check stitches every output page into one continuous column and
+compares an ink-density map of it (not page-N-vs-golden-page-N), so moving a
+page break doesn't cause false failures. The HTML report shows the source and
+reflowed pages as independent galleries for the run → eyeball → adjust → rerun
+loop. See [`docs/verify.md`](docs/verify.md) for the design and how to grow
+the corpus.
 
 ## Library usage
 

@@ -39,12 +39,14 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 .pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600}
 .ok{color:var(--good)}.fail{color:var(--bad)}.warnc{color:var(--warn)}
 .pill.ok{background:rgba(158,206,106,.15)}.pill.fail{background:rgba(247,118,142,.15)}
-.pair{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:14px 0;
-padding:12px;background:var(--panel);border:1px solid var(--rule);border-radius:10px}
-.pair.badpair{border-color:var(--bad)}
-.pair figure{margin:0}.pair img{width:100%;height:auto;border:1px solid var(--rule);
-border-radius:4px;background:#fff}
-.pair figcaption{color:var(--dim);font-size:12px;margin-bottom:6px}
+.banner{padding:10px 14px;border-radius:8px;margin:12px 0;font-size:13.5px}
+.banner.fail{background:rgba(247,118,142,.12);border:1px solid var(--bad)}
+.galleries{display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start}
+.col h3{position:sticky;top:0;background:var(--bg);margin:0 0 8px;padding:6px 0;
+font-size:14px;color:var(--dim)}
+.col figure{margin:0 0 12px}
+.col img{width:100%;height:auto;border:1px solid var(--rule);border-radius:4px;background:#fff}
+.col figcaption{color:var(--dim);font-size:12px;margin-bottom:4px}
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
 .card{background:var(--panel);border:1px solid var(--rule);border-radius:10px;padding:14px}
 .card h3{margin:0 0 6px;font-size:15px}
@@ -104,31 +106,24 @@ def fixture_page(
     out_thumbs: List[str],
     golden: Optional[GoldenResult],
 ) -> str:
-    fail_pages = set()
-    ssim_by_page: Dict[int, float] = {}
-    if golden:
-        for p in golden.pages:
-            if p.page >= 0:
-                ssim_by_page[p.page] = p.score
-                if not p.ok:
-                    fail_pages.add(p.page)
+    # Reflow re-paginates, so source page N and output page N are NOT the same
+    # content. Show the two documents as independent galleries in reading
+    # order rather than implying a page-to-page correspondence.
+    def gallery(thumbs: List[str], label: str) -> str:
+        cells = "".join(
+            f'<figure><figcaption>{label} p{i+1}</figcaption>'
+            f'<img src="{_esc(t)}" loading="lazy"></figure>'
+            for i, t in enumerate(thumbs)
+        ) or '<div class="muted">—</div>'
+        return f'<div class="col"><h3>{label}</h3>{cells}</div>'
 
-    pairs = []
-    n = max(len(src_thumbs), len(out_thumbs))
-    for i in range(n):
-        s = src_thumbs[i] if i < len(src_thumbs) else None
-        o = out_thumbs[i] if i < len(out_thumbs) else None
-        bad = "badpair" if i in fail_pages else ""
-        cap = f"reflowed p{i+1}"
-        if i in ssim_by_page:
-            cls = "fail" if i in fail_pages else "ok"
-            cap += f" &middot; <span class='{cls}'>SSIM {ssim_by_page[i]:.3f}</span>"
-        left = f'<img src="{_esc(s)}" loading="lazy">' if s else '<div class="muted">—</div>'
-        right = f'<img src="{_esc(o)}" loading="lazy">' if o else '<div class="muted">— (no output page)</div>'
-        pairs.append(
-            f'<div class="pair {bad}">'
-            f'<figure><figcaption>source p{i+1}</figcaption>{left}</figure>'
-            f'<figure><figcaption>{cap}</figcaption>{right}</figure></div>'
+    ssim_banner = ""
+    if golden and not golden.ok:
+        ssim_banner = (
+            f'<div class="banner fail">Visual regression: stitched-column SSIM '
+            f'{golden.score:.3f} &lt; {golden.threshold:.2f}. The reflowed '
+            f'rendering changed vs the golden. If intentional, re-bless with '
+            f'<code>--update-golden</code>.</div>'
         )
 
     miss = score.metrics.get("headings_missing") or []
@@ -137,19 +132,20 @@ def fixture_page(
         items = "".join(f"<li><code>{_esc(m)}</code></li>" for m in miss)
         miss_html = f"<h2>Headings missing from output ({len(miss)})</h2><ul>{items}</ul>"
 
-    ssim_note = f" &middot; SSIM min {golden.min_score:.3f}" if golden else ""
+    ssim_note = f" &middot; SSIM {golden.score:.3f}" if golden else ""
     return f"""<div class="wrap">
 <p class="muted"><a href="index.html">&larr; all fixtures</a></p>
 <h1>{_esc(score.name)}</h1>
 <p class="muted">{score.source_pages} source &rarr; {score.output_pages} output pages
 &middot; {score.seconds:.2f}s{ssim_note}</p>
+{ssim_banner}
 <h2>Scorecard vs baseline <span class="muted" style="font-weight:400">(&#9679; = CI gate)</span></h2>
 <table><thead><tr><th>metric</th><th class="num">baseline</th>
 <th class="num">current</th><th>status</th></tr></thead>
 <tbody>{_delta_rows(deltas)}</tbody></table>
 {miss_html}
-<h2>Source vs reflowed</h2>
-{''.join(pairs)}
+<h2>Pages <span class="muted" style="font-weight:400">(independent — reflow re-paginates)</span></h2>
+<div class="galleries">{gallery(src_thumbs, "source")}{gallery(out_thumbs, "reflowed")}</div>
 </div>"""
 
 
@@ -164,7 +160,7 @@ def index_page(rows: List[Dict[str, object]]) -> str:
             f'<div class="muted">retention <b>{r["retention"]:.3f}</b> &middot; '
             f'headings <b>{r["heading_retention"]:.2f}</b><br>'
             f'clipped <b class="{ "fail" if r["clipped"] else "ok"}">{r["clipped"]}</b> &middot; '
-            f'SSIM <b>{r["min_ssim"]:.3f}</b> &middot; {r["seconds"]:.2f}s</div></a>'
+            f'SSIM <b>{r["ssim"]:.3f}</b> &middot; {r["seconds"]:.2f}s</div></a>'
         )
     summary = _esc(rows and rows[0].get("_summary") or "")
     return f"""<div class="wrap">

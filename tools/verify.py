@@ -111,7 +111,7 @@ def main() -> int:
                 threshold=args.threshold, update=args.update_golden,
             )
             goldens[name] = golden
-            flat["min_ssim"] = round(golden.min_score, 4)
+            flat["ssim"] = round(golden.score, 4)
 
         new_baseline[name] = flat
 
@@ -121,7 +121,7 @@ def main() -> int:
 
         status = "FAIL" if gate_fail else "PASS"
         color = RED if gate_fail else GREEN
-        ssim_txt = f" ssim={golden.min_score:.3f}" if golden else ""
+        ssim_txt = f" ssim={golden.score:.3f}" if golden else ""
         boot = ""
         if golden and golden.bootstrapped:
             boot = _c(" [golden bootstrapped]", YELLOW)
@@ -146,7 +146,7 @@ def main() -> int:
             "retention": flat["retention"],
             "heading_retention": flat["heading_retention"],
             "clipped": flat["clipped_lines"],
-            "min_ssim": flat.get("min_ssim", 1.0),
+            "ssim": flat.get("ssim", 1.0),
             "seconds": score.seconds,
         })
 
