@@ -209,6 +209,32 @@ no private-use glyph garbage leaks into text, reading order is monotonic)
 and performance (full reflow under 5 seconds; extract and analyze phases
 under 1 second each on a 9-page paper).
 
+## Verify harness (iterate on rendering quality)
+
+The unittest suite pins specific bugs; the **verify harness** measures overall
+reflow quality across the whole fixture corpus and gates regressions. It needs
+no extra dependencies (stdlib + PyMuPDF) and runs in the same venv.
+
+```bash
+# Score every fixture and gate against the committed baseline (CI-friendly).
+uv run python tools/verify.py
+
+# Add a browsable HTML scorecard report and open it.
+uv run python tools/verify.py --report --open
+
+# Re-bless the numeric baseline after an intentional change.
+uv run python tools/verify.py --update-baseline
+```
+
+It reflows each fixture and, using the *source's own reading-order text as
+ground truth* (reflow must preserve text + order, only geometry changes),
+reports word retention, dropped/spurious/garbled words, heading survival,
+lines clipped by the page edge, and private-use-glyph leakage — failing CI
+when a gating metric regresses vs `verify/baseline.json`. The HTML report is a
+per-fixture scorecard with the baseline delta and any dropped headings, for
+the run → read → adjust → rerun loop. See [`docs/verify.md`](docs/verify.md)
+for the design and how to grow the corpus.
+
 ## Library usage
 
 ```python
