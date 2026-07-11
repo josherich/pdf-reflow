@@ -39,6 +39,18 @@ def _tokens(s: str) -> List[str]:
     return _WORD_RE.findall(_norm(s))
 
 
+def _wordchars(s: str) -> str:
+    """Just the word characters of ``s``, concatenated.
+
+    Drops whitespace, list-marker glyphs (bullets), and punctuation from both
+    sides of a comparison. Needed because re-extracting the reflowed PDF does
+    not reproduce inter-word spacing reliably -- especially between CJK and
+    Latin runs -- and renders list bullets as their own glyph, so a raw
+    substring test reports text as "missing" that is plainly present.
+    """
+    return "".join(_WORD_RE.findall(_norm(s)))
+
+
 def reference_stream(items) -> Tuple[List[str], List[str]]:
     """(reading-order tokens, heading texts) from analyzed FlowItems."""
     tokens: List[str] = []
@@ -106,15 +118,20 @@ def word_diff(ref: List[str], out: List[str]) -> Dict[str, float]:
 
 
 def heading_retention(headings: List[str], out_doc: "fitz.Document") -> Dict[str, float]:
-    """Fraction of source headings whose text survives in the output."""
-    full = _norm(" ".join(page.get_text("text") for page in out_doc))
+    """Fraction of source headings whose text survives in the output.
+
+    Matching is on word characters only (see ``_wordchars``): whitespace,
+    bullets and punctuation are stripped from both the heading and the output
+    text so re-extraction quirks don't report present headings as missing.
+    """
+    full = _wordchars(" ".join(page.get_text("text") for page in out_doc))
     kept = 0
     missing: List[str] = []
     for h in headings:
-        hn = _norm(h)
-        if hn and hn in full:
+        hw = _wordchars(h)
+        if hw and hw in full:
             kept += 1
-        elif hn:
+        elif hw:
             missing.append(h)
     n = max(1, len(headings))
     return {
