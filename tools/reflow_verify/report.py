@@ -43,6 +43,7 @@ h3{font-size:14px;margin:16px 0 6px}
 .chip{display:inline-block;padding:1px 7px;border-radius:6px;font-size:12.5px;
 font-family:ui-monospace,Menlo,monospace;background:var(--panel);
 border:1px solid var(--rule);white-space:pre-wrap}
+.glossary td{vertical-align:top}.glossary td:first-child{white-space:nowrap;width:1%}
 """
 
 
@@ -70,6 +71,41 @@ def _delta_rows(deltas: List[MetricDelta]) -> str:
             f"<td>{status}</td></tr>"
         )
     return "\n".join(rows)
+
+
+# One short sentence per metric, shown as a footer glossary on each report.
+_GLOSSARY = [
+    ("source_pages", "Number of pages in the original PDF."),
+    ("output_pages", "Number of pages in the reflowed mobile PDF."),
+    ("ref_words", "Word count of the source's reading-order text — the ground-truth reference."),
+    ("out_words", "Word count read back out of the reflowed PDF."),
+    ("matched", "Reference words that appear, in order, in the output."),
+    ("w_minus", "Reference words missing from the output (dropped text)."),
+    ("w_plus", "Output words not in the reference (spurious text, e.g. a kept running header)."),
+    ("w_tilde", "Words that changed between source and output (garbled or re-segmented)."),
+    ("retention", "Fraction of reference words preserved (matched ÷ ref_words) — the headline fidelity number."),
+    ("headings", "Headings the analyzer detected in the source."),
+    ("headings_kept", "Source headings whose text is found in the output."),
+    ("heading_retention", "Fraction of source headings preserved (headings_kept ÷ headings)."),
+    ("output_lines", "Total text lines rendered across the output pages."),
+    ("clipped_lines", "Output lines whose text runs past the page edge — a visible layout break."),
+    ("widow_lines", "Very short stranded lines (one or two characters alone on a line)."),
+    ("pua_chars", "Private-use-area glyphs leaking into text (math-font garbage)."),
+    ("figures_wanted", "Figures the analyzer decided to rasterize from the source."),
+    ("images_rendered", "Images actually placed in the output PDF."),
+    ("seconds", "Wall-clock time to reflow this fixture."),
+]
+
+
+def _glossary_section() -> str:
+    rows = "".join(
+        f"<tr><td><code>{_esc(name)}</code></td><td class='muted'>{_esc(desc)}</td></tr>"
+        for name, desc in _GLOSSARY
+    )
+    return (
+        "<h2>Metrics</h2>"
+        "<table class='glossary'><tbody>" + rows + "</tbody></table>"
+    )
 
 
 def _word_chips(words: List[str]) -> str:
@@ -120,6 +156,7 @@ def fixture_page(score: FixtureScore, deltas: List[MetricDelta]) -> str:
 <tbody>{_delta_rows(deltas)}</tbody></table>
 {miss_html}
 {_word_section(score)}
+{_glossary_section()}
 </div>"""
 
 
