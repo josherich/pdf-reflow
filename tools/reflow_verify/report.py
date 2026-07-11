@@ -1,24 +1,18 @@
-"""Layer 3: the HTML iteration report.
+"""Layer 3: the HTML scorecard report.
 
-Per fixture: the scorecard delta vs baseline on top, then source pages beside
-reflowed pages so tuning a heuristic is run -> eyeball -> adjust -> rerun.
-Pages that fail the SSIM golden are flagged. Pure string templating -- no
-templating engine, no JS framework.
+A browsable summary: a card per fixture, and a detail page with the scorecard
+delta vs baseline and any headings that fell out of the output. No page images
+-- this layer is the numbers, made easy to read and diff at a glance. Pure
+string templating; no templating engine, no JS.
 """
 
 from __future__ import annotations
 
 import html
-import os
-from typing import Dict, List, Optional
-
-import fitz
+from typing import Dict, List
 
 from .baseline import MetricDelta
-from .golden import GoldenResult
 from .metrics import FixtureScore
-
-_THUMB_DPI = 72
 
 _CSS = """
 :root{--bg:#0b0e14;--panel:#131826;--ink:#e6e9ef;--dim:#9aa4b8;--rule:#232b3d;
@@ -27,7 +21,7 @@ _CSS = """
 --dim:#5a6478;--rule:#e2e7ef}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);
 font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
-.wrap{max-width:1100px;margin:0 auto;padding:24px 18px 64px}
+.wrap{max-width:900px;margin:0 auto;padding:24px 18px 64px}
 h1{font-size:22px;margin:0 0 4px}h2{font-size:17px;margin:28px 0 10px;
 border-bottom:1px solid var(--rule);padding-bottom:6px}
 a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
@@ -39,18 +33,11 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 .pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600}
 .ok{color:var(--good)}.fail{color:var(--bad)}.warnc{color:var(--warn)}
 .pill.ok{background:rgba(158,206,106,.15)}.pill.fail{background:rgba(247,118,142,.15)}
-.banner{padding:10px 14px;border-radius:8px;margin:12px 0;font-size:13.5px}
-.banner.fail{background:rgba(247,118,142,.12);border:1px solid var(--bad)}
-.galleries{display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start}
-.col h3{position:sticky;top:0;background:var(--bg);margin:0 0 8px;padding:6px 0;
-font-size:14px;color:var(--dim)}
-.col figure{margin:0 0 12px}
-.col img{width:100%;height:auto;border:1px solid var(--rule);border-radius:4px;background:#fff}
-.col figcaption{color:var(--dim);font-size:12px;margin-bottom:4px}
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
 .card{background:var(--panel);border:1px solid var(--rule);border-radius:10px;padding:14px}
 .card h3{margin:0 0 6px;font-size:15px}
 code{font-family:ui-monospace,Menlo,monospace;font-size:12.5px}
+ul{margin:6px 0 0;padding-left:20px}li{margin:2px 0}
 """
 
 
@@ -58,30 +45,11 @@ def _esc(s) -> str:
     return html.escape(str(s))
 
 
-def render_thumbs(pdf_path: str, img_dir: str, prefix: str, dpi: int = _THUMB_DPI,
-                  max_pages: int = 40) -> List[str]:
-    """Rasterize pages to PNG thumbnails, return relative paths (from report root)."""
-    os.makedirs(img_dir, exist_ok=True)
-    rels: List[str] = []
-    doc = fitz.open(pdf_path)
-    try:
-        for i, page in enumerate(doc):
-            if i >= max_pages:
-                break
-            pix = page.get_pixmap(dpi=dpi)
-            fn = f"{prefix}_p{i:03d}.png"
-            pix.save(os.path.join(img_dir, fn))
-            rels.append(f"img/{fn}")
-    finally:
-        doc.close()
-    return rels
-
-
 def _delta_rows(deltas: List[MetricDelta]) -> str:
     rows = []
     for d in deltas:
         if d.regressed:
-            status = f'<span class="pill fail">REGRESSED</span>'
+            status = '<span class="pill fail">REGRESSED</span>'
         elif d.note in ("new",):
             status = '<span class="muted">new</span>'
         elif d.note and d.note != "untracked":
@@ -99,53 +67,23 @@ def _delta_rows(deltas: List[MetricDelta]) -> str:
     return "\n".join(rows)
 
 
-def fixture_page(
-    score: FixtureScore,
-    deltas: List[MetricDelta],
-    src_thumbs: List[str],
-    out_thumbs: List[str],
-    golden: Optional[GoldenResult],
-) -> str:
-    # Reflow re-paginates, so source page N and output page N are NOT the same
-    # content. Show the two documents as independent galleries in reading
-    # order rather than implying a page-to-page correspondence.
-    def gallery(thumbs: List[str], label: str) -> str:
-        cells = "".join(
-            f'<figure><figcaption>{label} p{i+1}</figcaption>'
-            f'<img src="{_esc(t)}" loading="lazy"></figure>'
-            for i, t in enumerate(thumbs)
-        ) or '<div class="muted">—</div>'
-        return f'<div class="col"><h3>{label}</h3>{cells}</div>'
-
-    ssim_banner = ""
-    if golden and not golden.ok:
-        ssim_banner = (
-            f'<div class="banner fail">Visual regression: stitched-column SSIM '
-            f'{golden.score:.3f} &lt; {golden.threshold:.2f}. The reflowed '
-            f'rendering changed vs the golden. If intentional, re-bless with '
-            f'<code>--update-golden</code>.</div>'
-        )
-
+def fixture_page(score: FixtureScore, deltas: List[MetricDelta]) -> str:
     miss = score.metrics.get("headings_missing") or []
     miss_html = ""
     if miss:
         items = "".join(f"<li><code>{_esc(m)}</code></li>" for m in miss)
         miss_html = f"<h2>Headings missing from output ({len(miss)})</h2><ul>{items}</ul>"
 
-    ssim_note = f" &middot; SSIM {golden.score:.3f}" if golden else ""
     return f"""<div class="wrap">
 <p class="muted"><a href="index.html">&larr; all fixtures</a></p>
 <h1>{_esc(score.name)}</h1>
 <p class="muted">{score.source_pages} source &rarr; {score.output_pages} output pages
-&middot; {score.seconds:.2f}s{ssim_note}</p>
-{ssim_banner}
+&middot; {score.seconds:.2f}s</p>
 <h2>Scorecard vs baseline <span class="muted" style="font-weight:400">(&#9679; = CI gate)</span></h2>
 <table><thead><tr><th>metric</th><th class="num">baseline</th>
 <th class="num">current</th><th>status</th></tr></thead>
 <tbody>{_delta_rows(deltas)}</tbody></table>
 {miss_html}
-<h2>Pages <span class="muted" style="font-weight:400">(independent — reflow re-paginates)</span></h2>
-<div class="galleries">{gallery(src_thumbs, "source")}{gallery(out_thumbs, "reflowed")}</div>
 </div>"""
 
 
@@ -153,14 +91,13 @@ def index_page(rows: List[Dict[str, object]]) -> str:
     cards = []
     for r in rows:
         status = r["status"]
-        cls = {"PASS": "ok", "FAIL": "fail"}.get(status, "warnc")
         pill = f'<span class="pill {"ok" if status=="PASS" else "fail"}">{status}</span>'
         cards.append(
             f'<a class="card" href="{_esc(r["href"])}"><h3>{_esc(r["name"])} {pill}</h3>'
             f'<div class="muted">retention <b>{r["retention"]:.3f}</b> &middot; '
             f'headings <b>{r["heading_retention"]:.2f}</b><br>'
             f'clipped <b class="{ "fail" if r["clipped"] else "ok"}">{r["clipped"]}</b> &middot; '
-            f'SSIM <b>{r["ssim"]:.3f}</b> &middot; {r["seconds"]:.2f}s</div></a>'
+            f'{r["seconds"]:.2f}s</div></a>'
         )
     summary = _esc(rows and rows[0].get("_summary") or "")
     return f"""<div class="wrap">

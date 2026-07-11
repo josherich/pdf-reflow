@@ -219,26 +219,21 @@ no extra dependencies (stdlib + PyMuPDF) and runs in the same venv.
 # Score every fixture and gate against the committed baseline (CI-friendly).
 uv run python tools/verify.py
 
-# Add a side-by-side HTML report + SSIM visual golden comparison, open it.
-uv run python tools/verify.py --report --golden --open
+# Add a browsable HTML scorecard report and open it.
+uv run python tools/verify.py --report --open
 
-# Re-bless after an intentional change:
-uv run python tools/verify.py --update-baseline   # numeric scorecard
-uv run python tools/verify.py --update-golden     # golden page images
+# Re-bless the numeric baseline after an intentional change.
+uv run python tools/verify.py --update-baseline
 ```
 
 It reflows each fixture and, using the *source's own reading-order text as
 ground truth* (reflow must preserve text + order, only geometry changes),
 reports word retention, dropped/spurious/garbled words, heading survival,
-lines clipped by the page edge, private-use-glyph leakage, and a
-pagination-invariant SSIM of the reflowed column against a golden snapshot —
-failing CI when a gating metric regresses. Because reflow re-paginates, the
-visual check stitches every output page into one continuous column and
-compares an ink-density map of it (not page-N-vs-golden-page-N), so moving a
-page break doesn't cause false failures. The HTML report shows the source and
-reflowed pages as independent galleries for the run → eyeball → adjust → rerun
-loop. See [`docs/verify.md`](docs/verify.md) for the design and how to grow
-the corpus.
+lines clipped by the page edge, and private-use-glyph leakage — failing CI
+when a gating metric regresses vs `verify/baseline.json`. The HTML report is a
+per-fixture scorecard with the baseline delta and any dropped headings, for
+the run → read → adjust → rerun loop. See [`docs/verify.md`](docs/verify.md)
+for the design and how to grow the corpus.
 
 ## Library usage
 
