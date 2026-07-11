@@ -38,6 +38,11 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 .card h3{margin:0 0 6px;font-size:15px}
 code{font-family:ui-monospace,Menlo,monospace;font-size:12.5px}
 ul{margin:6px 0 0;padding-left:20px}li{margin:2px 0}
+h3{font-size:14px;margin:16px 0 6px}
+.chips{display:flex;flex-wrap:wrap;gap:5px}
+.chip{display:inline-block;padding:1px 7px;border-radius:6px;font-size:12.5px;
+font-family:ui-monospace,Menlo,monospace;background:var(--panel);
+border:1px solid var(--rule);white-space:pre-wrap}
 """
 
 
@@ -67,6 +72,36 @@ def _delta_rows(deltas: List[MetricDelta]) -> str:
     return "\n".join(rows)
 
 
+def _word_chips(words: List[str]) -> str:
+    return "".join(f"<span class='chip'>{_esc(w)}</span>" for w in words)
+
+
+def _word_section(score: FixtureScore) -> str:
+    """Show the actual dropped / spurious / changed words, not just counts."""
+    m = score.metrics
+    groups = [
+        ("w_minus", "Dropped words (in source, not in output)",
+         m.get("w_minus_words") or [], m.get("w_minus", 0)),
+        ("w_plus", "Spurious words (in output, not in source)",
+         m.get("w_plus_words") or [], m.get("w_plus", 0)),
+        ("w_tilde", "Changed words (source → output)",
+         m.get("w_tilde_words") or [], m.get("w_tilde", 0)),
+    ]
+    blocks = []
+    for _, label, words, total in groups:
+        if not total:
+            continue
+        shown = len(words)
+        more = f" <span class='muted'>(showing {shown} of {total})</span>" if total > shown else ""
+        blocks.append(
+            f"<h3>{_esc(label)} — {total}{more}</h3>"
+            f"<div class='chips'>{_word_chips(words)}</div>"
+        )
+    if not blocks:
+        return ""
+    return "<h2>Word differences</h2>" + "".join(blocks)
+
+
 def fixture_page(score: FixtureScore, deltas: List[MetricDelta]) -> str:
     miss = score.metrics.get("headings_missing") or []
     miss_html = ""
@@ -84,6 +119,7 @@ def fixture_page(score: FixtureScore, deltas: List[MetricDelta]) -> str:
 <th class="num">current</th><th>status</th></tr></thead>
 <tbody>{_delta_rows(deltas)}</tbody></table>
 {miss_html}
+{_word_section(score)}
 </div>"""
 
 

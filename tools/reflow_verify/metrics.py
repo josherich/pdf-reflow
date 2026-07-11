@@ -92,19 +92,31 @@ def word_diff(ref: List[str], out: List[str]) -> Dict[str, float]:
     """
     sm = difflib.SequenceMatcher(a=ref, b=out, autojunk=False)
     matched = w_minus = w_plus = w_tilde = 0
+    # Example words per category, so the report can show *what* changed, not
+    # just how much. Capped; these are list fields and stay out of the numeric
+    # baseline (FixtureScore.flat keeps only ints/floats).
+    minus_words: List[str] = []
+    plus_words: List[str] = []
+    tilde_pairs: List[str] = []
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         la, lb = i2 - i1, j2 - j1
         if tag == "equal":
             matched += la
         elif tag == "delete":
             w_minus += la
+            minus_words.extend(ref[i1:i2])
         elif tag == "insert":
             w_plus += lb
+            plus_words.extend(out[j1:j2])
         elif tag == "replace":
             common = min(la, lb)
             w_tilde += common
             w_minus += la - common
             w_plus += lb - common
+            for k in range(common):
+                tilde_pairs.append(f"{ref[i1 + k]} → {out[j1 + k]}")
+            minus_words.extend(ref[i1 + common:i2])
+            plus_words.extend(out[j1 + common:j2])
     ref_n = max(1, len(ref))
     return {
         "ref_words": len(ref),
@@ -114,6 +126,9 @@ def word_diff(ref: List[str], out: List[str]) -> Dict[str, float]:
         "w_plus": w_plus,
         "w_tilde": w_tilde,
         "retention": round(matched / ref_n, 4),
+        "w_minus_words": minus_words[:60],
+        "w_plus_words": plus_words[:60],
+        "w_tilde_words": tilde_pairs[:60],
     }
 
 
