@@ -6,6 +6,8 @@
     uv run python tools/verify.py --update-baseline   # re-bless the numeric baseline
     uv run python tools/verify.py --fixtures bitcoin.pdf two-column.pdf
     uv run python tools/verify.py --report --open # open the report in a browser
+    uv run python tools/verify.py --serve         # visual feedback web tool
+    uv run python tools/verify.py --feedback      # dump human feedback as JSON
 
 Exit code is non-zero when a gating metric regressed vs baseline, so it drops
 straight into CI. See docs/verify.md for the design.
@@ -29,12 +31,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from reflow_verify.metrics import score_fixture, FixtureScore  # noqa: E402
 from reflow_verify import baseline as bl  # noqa: E402
 from reflow_verify import report as rpt  # noqa: E402
+from reflow_verify import visual as vz  # noqa: E402
+from reflow_verify import webtool as wt  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURE_DIR = os.path.join(ROOT, "tests", "fixtures")
 VERIFY_DIR = os.path.join(ROOT, "verify")
 OUT_DIR = os.path.join(VERIFY_DIR, "out")
 REPORT_DIR = os.path.join(VERIFY_DIR, "report")
+PAGES_DIR = os.path.join(VERIFY_DIR, "pages")
+GOLDEN_DIR = os.path.join(VERIFY_DIR, "golden")
+FEEDBACK_DIR = os.path.join(VERIFY_DIR, "feedback")
 BASELINE_PATH = os.path.join(VERIFY_DIR, "baseline.json")
 
 GREEN, RED, YELLOW, DIM, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
@@ -63,6 +70,38 @@ def load_baseline() -> Dict[str, Dict[str, float]]:
     return {}
 
 
+def ensure_outputs(fixtures: List[str]) -> None:
+    """Reflow any fixture whose output PDF is missing or stale, without scoring.
+
+    Used by --serve / --feedback so the visual tools always look at output
+    from the current code, even when the scorecard hasn't been run yet.
+    """
+    from pdf_reflow import reflow_pdf, ReflowConfig
+
+    for pdf in fixtures:
+        out_pdf = os.path.join(OUT_DIR, os.path.basename(pdf))
+        if (not os.path.exists(out_pdf)
+                or os.path.getmtime(out_pdf) < os.path.getmtime(pdf)):
+            print(f"  reflowing {os.path.basename(pdf)} ...")
+            reflow_pdf(pdf, out_pdf, ReflowConfig())
+
+
+def serve(port: int) -> int:
+    httpd = wt.make_server(FIXTURE_DIR, OUT_DIR, PAGES_DIR, GOLDEN_DIR,
+                           FEEDBACK_DIR, port=port)
+    url = f"http://127.0.0.1:{httpd.server_address[1]}/"
+    print(f"\n  visual feedback tool: {url}  (Ctrl-C to stop)")
+    print(f"  golden images  -> {GOLDEN_DIR}")
+    print(f"  annotations    -> {FEEDBACK_DIR}")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.server_close()
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -71,15 +110,31 @@ def main() -> int:
     ap.add_argument("--report", action="store_true", help="write HTML scorecard report")
     ap.add_argument("--update-baseline", action="store_true", help="re-bless numeric baseline")
     ap.add_argument("--open", action="store_true", help="open the report when done")
+    ap.add_argument("--serve", action="store_true",
+                    help="launch the visual feedback web tool (golden compare + annotate)")
+    ap.add_argument("--port", type=int, default=8017, help="port for --serve (0 = any free)")
+    ap.add_argument("--feedback", action="store_true",
+                    help="print human visual feedback (golden diffs + annotations) as JSON")
     args = ap.parse_args()
 
     fixtures = discover_fixtures(args.fixtures)
     os.makedirs(OUT_DIR, exist_ok=True)
+
+    # ---- Layer 2: visual feedback modes (no scoring) -------------------
+    if args.serve or args.feedback:
+        ensure_outputs(fixtures)
+        if args.feedback:
+            summary = vz.feedback_summary(OUT_DIR, PAGES_DIR, GOLDEN_DIR, FEEDBACK_DIR)
+            print(json.dumps(summary, indent=2, ensure_ascii=False))
+            return 0
+        return serve(args.port)
+
     baseline = load_baseline()
 
     scores: List[FixtureScore] = []
     new_baseline: Dict[str, Dict[str, float]] = {}
     any_gate_fail = False
+    any_feedback = False
     index_rows: List[Dict[str, object]] = []
 
     print(f"pdf_reflow verify  {DIM}(MuPDF {fitz.VersionFitz}, PyMuPDF {fitz.VersionBind}){RESET}\n")
@@ -90,6 +145,16 @@ def main() -> int:
         score = score_fixture(pdf, out_pdf)
         scores.append(score)
 
+        # Layer-2 signals, when the user has provided them: mean pixel diff
+        # vs uploaded golden page images, and open annotation notes.
+        stem = os.path.splitext(name)[0]
+        ratios = vz.golden_compare(out_pdf, os.path.join(PAGES_DIR, stem),
+                                   os.path.join(GOLDEN_DIR, stem))
+        if ratios:
+            score.metrics["golden_diff"] = round(sum(ratios.values()) / len(ratios), 4)
+        open_notes = vz.open_annotation_count(FEEDBACK_DIR, stem)
+        any_feedback = any_feedback or bool(ratios) or bool(open_notes)
+
         flat = score.flat()
         new_baseline[name] = flat
 
@@ -99,11 +164,16 @@ def main() -> int:
 
         status = "FAIL" if gate_fail else "PASS"
         color = RED if gate_fail else GREEN
+        extra = ""
+        if ratios:
+            extra += f" gold={flat['golden_diff']:.3f}"
+        if open_notes:
+            extra += _c(f" notes={open_notes}", YELLOW)
         print(
             f"  {_c(status, color)}  {name:<34} "
             f"ret={flat['retention']:.3f} head={flat['heading_retention']:.2f} "
             f"clip={flat['clipped_lines']} pua={flat['pua_chars']} "
-            f"{flat['output_pages']}pg {score.seconds:.2f}s"
+            f"{flat['output_pages']}pg {score.seconds:.2f}s{extra}"
         )
         for d in deltas:
             if d.regressed:
@@ -159,6 +229,9 @@ def main() -> int:
         return 0
 
     print()
+    if any_feedback:
+        print(_c("  human visual feedback present — read it with: "
+                 "uv run python tools/verify.py --feedback", DIM))
     if any_gate_fail:
         print(_c("  REGRESSION: a gating metric moved the wrong way vs baseline.", RED))
         return 1
