@@ -114,7 +114,8 @@ class LayoutConfig:
     heading_space_above: float = 9.0
     heading_space_below: float = 3.0
     figure_max_height_frac: float = 0.7  # max image height as fraction of content height
-    figure_max_upscale: float = 2.0      # never blow a tiny equation past 2x
+    figure_max_upscale: float = 2.0      # how far a real figure may be enlarged to fill the column
+    equation_max_upscale: float = 1.0    # display-math rasters render at authored size (never enlarged)
     figure_dpi: float = 150.0            # rasterization DPI (150 is sharp on mobile; 220+ for print)
 
     @property
@@ -919,8 +920,13 @@ def layout(
             # Fit-to-column would stretch a 60pt-wide equation crop 5x,
             # filling 150pt+ of vertical space with two glyphs. Cap the
             # upscale so small math fragments stay near a readable size
-            # and get centered in the column instead.
-            scale = min(cw / sw, cfg.figure_max_upscale)
+            # and get centered in the column instead. Display-math rasters
+            # (no vector art) use a tighter cap so their glyphs keep the
+            # authored size and don't tower over the body text; only true
+            # figures are enlarged to fill the column.
+            max_upscale = (cfg.equation_max_upscale if it.is_equation
+                           else cfg.figure_max_upscale)
+            scale = min(cw / sw, max_upscale)
             w = sw * scale
             h = sh * scale
             pb.add_space(cfg.para_space)
