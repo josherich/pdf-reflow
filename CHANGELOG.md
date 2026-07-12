@@ -1,7 +1,5 @@
 # Changelog
 
-This changelog is indexed by commit date and summarizes merged pull requests plus notable direct commits on the main branch history.
-
 ## 2026-07-11
 
 - [#15](https://github.com/josherich/pdf-reflow/pull/15) Added visual feedback tooling for the verification workflow, including visual analysis helpers, a web review tool, fixture feedback files, and expanded documentation.
