@@ -1,0 +1,19 @@
+{
+  "fixture": "llm-cjk.pdf",
+  "updated": "2026-07-11T16:58:48",
+  "annotations": [
+    {
+      "id": "82b82c2fb1af",
+      "page": 22,
+      "rect": [
+        0.134,
+        0.4393,
+        0.9659,
+        0.5389
+      ],
+      "note": "formula is incorrectly clipped",
+      "status": "resolved",
+      "created": "2026-07-11T16:58:48"
+    }
+  ]
+}

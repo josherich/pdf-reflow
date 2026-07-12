@@ -28,6 +28,7 @@ METRIC_RULES: Dict[str, Dict[str, object]] = {
     "w_plus":            {"dir": "down", "tol": 10,   "gate": False},
     "output_pages":      {"dir": "flat", "tol": None, "gate": False},
     "widow_lines":       {"dir": "down", "tol": 5,    "gate": False},
+    "golden_diff":       {"dir": "down", "tol": 0.02, "gate": False},
     "images_rendered":   {"dir": "flat", "tol": None, "gate": False},
     "seconds":           {"dir": "down", "tol": 1.0,  "gate": False},
 }

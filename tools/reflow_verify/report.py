@@ -91,6 +91,7 @@ _GLOSSARY = [
     ("clipped_lines", "Output lines whose text runs past the page edge — a visible layout break."),
     ("widow_lines", "Very short stranded lines (one or two characters alone on a line)."),
     ("pua_chars", "Private-use-area glyphs leaking into text (math-font garbage)."),
+    ("golden_diff", "Mean pixel-diff ratio vs user-uploaded golden page images (verify/golden/) — lower is closer to the desired look."),
     ("figures_wanted", "Figures the analyzer decided to rasterize from the source."),
     ("images_rendered", "Images actually placed in the output PDF."),
     ("seconds", "Wall-clock time to reflow this fixture."),

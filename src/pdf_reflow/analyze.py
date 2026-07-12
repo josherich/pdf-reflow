@@ -102,6 +102,8 @@ class FlowItem:
     indent: float = 0.0                 # for 'toc': source-pt indent of the entry relative to the block column
     family: str = "serif"               # 'serif' | 'sans' — mirrors source typeface for output
     column: int = 0                     # source column / reading-order lane the item came from
+    is_equation: bool = False           # for 'figure': the raster is display math (no vector art),
+                                        #   so it must not be upscaled past its authored size
 
 
 # Font-name prefixes that identify math-only glyph fonts. LaTeX's
@@ -964,11 +966,17 @@ def _classify_alignment(
         # Column-left: the most common x0 (rounded) across body
         # paragraph lines — that's the regular wrap position, immune
         # to paragraph-first-line indents and hanging punctuation.
-        # Column-right: the max x1 — fully-justified CJK or Latin
-        # body lines fill out to the right edge.
+        # Column-right: the most common x1 — the justified right edge
+        # where full body lines end. Using the *mode* (not max) keeps a
+        # single wider block from skewing the estimate: e.g. a page with
+        # an indented abstract (108→504) above full-width body text
+        # (72→540) would otherwise pair the abstract's left edge with the
+        # body's right edge, putting the column center 18pt off and making
+        # lines genuinely centered about the page middle look asymmetric.
         mode_x0 = Counter(round(x) for x in body_x0s).most_common(1)[0][0]
+        mode_x1 = Counter(round(x) for x in body_x1s).most_common(1)[0][0]
         col_left = max(page_left, float(mode_x0))
-        col_right = min(page_right, max(body_x1s))
+        col_right = min(page_right, float(mode_x1))
         if col_right - col_left < 50.0:
             # Fallback if the refinement collapsed (very narrow column
             # estimate, e.g. only one body block with constant width).
@@ -1048,7 +1056,8 @@ def _figure_regions_in_extent(
         if _is_figure_image(im.bbox, page.width, page.height) and in_extent(im.bbox):
             dboxes.append(im.bbox)
     for b in blocks:
-        if b.kind == "equation" and in_extent(b.bbox):
+        if (b.kind == "equation" and in_extent(b.bbox)
+                and _equation_seeds_figure(b, body_size)):
             dboxes.append(b.bbox)
     if not dboxes:
         return []
@@ -1098,6 +1107,98 @@ def _figure_regions_in_extent(
     return [(b[0], b[1]) for b in merged if (b[1] - b[0]) > body_size * 1.2]
 
 
+def _is_display_equation_body(b: "Block") -> bool:
+    """A ``body``-classified block that is really a stand-alone display
+    equation the math-fraction test under-scored.
+
+    LaTeX numbers a display equation like ``h(l) = ReLU(W x + b)  (15)``
+    with much of the line in roman font (``ReLU``, digits, the ``(15)``
+    tag), so its math-font fraction can dip below the equation threshold
+    and it lands as ``body``. When such a line sits flush against a real
+    equation figure band it must be absorbed into the band; otherwise it
+    is both typeset as (broken) text and clipped into the top of the
+    neighbouring equation raster. Kept tight: a single line, carrying a
+    math font, essentially free of CJK (so a Chinese sentence that merely
+    embeds an inline symbol is never pulled into a figure).
+    """
+    if b.kind != "body" or len(b.lines) != 1:
+        return False
+    if not _block_has_math_font(b):
+        return False
+    t = b.text
+    cjk = sum(1 for c in t if _is_cjk_char(c))
+    if not t or cjk / len(t) >= 0.15:
+        return False
+    return any(c.isalnum() for c in t)
+
+
+def _equation_seeds_figure(b: "Block", body_size: float) -> bool:
+    """Whether an ``equation`` block is substantial enough to seed a figure
+    band.
+
+    Sub-baseline math fragments — the tiny CMMI7 sub/superscripts that a
+    body paragraph's inline math ($x_i$, $b^{(l)}$) fragments into — are
+    tagged ``equation`` but are only a few points tall AND set in a
+    below-body font. When such a stack sits just under a display equation
+    it drags the band's lower edge down through the following body
+    paragraph, so that paragraph is both rasterized into the figure and
+    re-typeset as text.
+
+    A block is a sliver only when it is BOTH shorter than one body line
+    AND set below body size — that is the fragment signature. We must not
+    exclude on height alone: a genuine one-line display equation
+    (``∫ x dx = 1/2``) is often a hair under ``body_size`` tall yet set at
+    full body size; nor on size alone: a multi-line display equation's
+    dominant size can be dragged down by its own sub/superscripts. Either
+    a body-height OR a body-size block is kept.
+    """
+    short = (b.bbox[3] - b.bbox[1]) < body_size
+    small = b.size < body_size - 1.0
+    return not (short and small)
+
+
+def _band_has_graphic(
+    page: PageContent,
+    y0: float,
+    y1: float,
+    x_extent: Optional[Tuple[float, float]] = None,
+) -> bool:
+    """True when a figure band [y0, y1] contains real vector art or a
+    raster image — i.e. it is a genuine figure, not a rasterized display
+    equation.
+
+    Display-math bands are seeded purely from ``equation`` blocks and any
+    fraction-bar hairlines they contain are rejected by
+    ``_is_meaningful_drawing``. Such bands hold only text glyphs, so they
+    must be rendered at their authored size rather than upscaled to fill
+    the column (which makes formulas look oversized). ``x_extent`` scopes
+    the check to a single column on two-column pages.
+    """
+    def in_x(bbox: BBox) -> bool:
+        if x_extent is None:
+            return True
+        cx = (bbox[0] + bbox[2]) / 2
+        return x_extent[0] - 2 <= cx <= x_extent[1] + 2
+
+    for d in page.drawings:
+        if not _is_meaningful_drawing(d.bbox):
+            continue
+        if _in_page_chrome_band(d.bbox, page.height):
+            continue
+        if d.bbox[3] < y0 or d.bbox[1] > y1:
+            continue
+        if in_x(d.bbox):
+            return True
+    for im in page.images:
+        if not _is_figure_image(im.bbox, page.width, page.height):
+            continue
+        if im.bbox[3] < y0 or im.bbox[1] > y1:
+            continue
+        if in_x(im.bbox):
+            return True
+    return False
+
+
 def _figure_regions(page: PageContent, blocks: List[Block], body_size: float) -> List[Tuple[float, float]]:
     """Return (y0, y1) bands of the source page that are figure regions.
 
@@ -1125,7 +1226,7 @@ def _figure_regions(page: PageContent, blocks: List[Block], body_size: float) ->
         if _is_figure_image(im.bbox, page.width, page.height):
             dboxes.append(im.bbox)
     for b in blocks:
-        if b.kind == "equation":
+        if b.kind == "equation" and _equation_seeds_figure(b, body_size):
             dboxes.append(b.bbox)
     if not dboxes:
         return []
@@ -1151,11 +1252,22 @@ def _figure_regions(page: PageContent, blocks: List[Block], body_size: float) ->
     for b in blocks:
         if _is_page_chrome(b, page.height, body_size):
             continue
+        by0, by1 = b.bbox[1], b.bbox[3]
+        # A display-equation line the classifier mislabeled ``body`` is
+        # absorbed only when it genuinely overlaps an existing band's
+        # y-extent — never on mere proximity, so an equation figure can't
+        # reach up and swallow the prose line above it.
+        if _is_display_equation_body(b):
+            for band in bands:
+                if by0 < band[1] and by1 > band[0]:
+                    band[0] = min(band[0], by0)
+                    band[1] = max(band[1], by1)
+                    break
+            continue
         bw = b.bbox[2] - b.bbox[0]
         is_narrow_fragment = bw < 40.0 and len(b.text.strip()) <= 6
         if b.kind in ("body", "heading", "toc") and not (b.kind == "body" and is_narrow_fragment):
             continue
-        by0, by1 = b.bbox[1], b.bbox[3]
         for band in bands:
             # Downward extension is tighter than upward: we don't want a
             # band of display equations to swallow the next body paragraph
@@ -1292,7 +1404,8 @@ def _analyze_two_column(
                             min(x_hi, b.bbox[2] + 4), b.bbox[3] + 2)
                 items_with_key.append((sort_col, b.bbox[1], 0, FlowItem(
                     kind="figure", page_index=page.index,
-                    bbox=b.bbox, source_rect=src_rect, column=sort_col)))
+                    bbox=b.bbox, source_rect=src_rect, column=sort_col,
+                    is_equation=True)))
                 continue
             if b.kind == "code":
                 code_lines = [ln.text.rstrip() for ln in b.lines]
@@ -1346,7 +1459,8 @@ def _analyze_two_column(
             items_with_key.append((sort_col, y0, 0, FlowItem(
                 kind="figure", page_index=page.index,
                 bbox=(fx0, y0, fx1, y1), source_rect=src_rect,
-                column=sort_col)))
+                column=sort_col,
+                is_equation=not _band_has_graphic(page, y0, y1, x_ext))))
 
     # Full-width header items: any full-width block whose center y is
     # above the two-column band start.
@@ -1463,6 +1577,7 @@ def analyze_page(page: PageContent, body_size: float) -> List[FlowItem]:
                 bbox=b.bbox,
                 source_rect=src_rect,
                 column=b.column,
+                is_equation=True,
             )
             items_with_y.append((b.column, b.bbox[1], item))
             continue
@@ -1541,6 +1656,7 @@ def analyze_page(page: PageContent, body_size: float) -> List[FlowItem]:
             page_index=page.index,
             bbox=(fx0, y0, fx1, y1),
             source_rect=src_rect,
+            is_equation=not _band_has_graphic(page, y0, y1),
         )
         # Figures always occupy column 0 in reading order at their top y.
         items_with_y.append((0, y0, item))
