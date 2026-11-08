@@ -18,10 +18,11 @@ const PYODIDE_INDEX_URL = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/
 // `web/build-pymupdf-wheel.sh` and committed under web/wheels/.
 const PYMUPDF_WHEEL_URL = "wheels/pymupdf.whl";
 
-// Files fetched from src/pdf_reflow/ (relative to site root) and copied into
-// the Pyodide virtual filesystem under /pdf_reflow/. The deploy workflow puts
-// src/pdf_reflow/*.py alongside the web/ files so this path resolves on both
-// GitHub Pages and a local server started from the repo root.
+// Files fetched from src/pdf_reflow/ and copied into the Pyodide virtual
+// filesystem under /pdf_reflow/. GitHub Pages and a local server started from
+// the repo root lay those files out differently; see resolveSourceBase().
+// Keep in sync with src/pdf_reflow/*.py: tests/test_web_demo_sources.py
+// fails if a module is missing here.
 const PDF_REFLOW_SOURCES = [
   "__init__.py",
   "__main__.py",
@@ -29,11 +30,52 @@ const PDF_REFLOW_SOURCES = [
   "linebreak.py",
   "knuth_plass.py",
   "extract.py",
+  "mathfont.py",
   "analyze.py",
+  "mathflow.py",
+  "math_render.py",
   "layout.py",
   "render.py",
   "reflow.py",
 ];
+
+// Where those files live depends on how the site is served:
+//   - GitHub Pages: the deploy workflow puts web/ and src/pdf_reflow/ side by
+//     side at the site root, so the page (at /) sees src/pdf_reflow/.
+//   - `python -m http.server` from the repo root: the page is at /web/, one
+//     level down, so the sources are at ../src/pdf_reflow/.
+// Probe rather than guess, so both layouts work.
+let sourceBasePromise = null;
+
+function sourceBaseCandidates() {
+  // Order the candidates by what the page URL implies, so the common cases
+  // don't emit a 404 for the losing guess.
+  const pageDir = new URL(".", location.href).pathname;
+  return pageDir.endsWith("/web/")
+    ? ["../src/pdf_reflow/", "src/pdf_reflow/"]
+    : ["src/pdf_reflow/", "../src/pdf_reflow/"];
+}
+
+function resolveSourceBase() {
+  if (!sourceBasePromise) {
+    sourceBasePromise = (async () => {
+      for (const base of sourceBaseCandidates()) {
+        try {
+          const resp = await fetch(`${base}__init__.py`, { method: "HEAD" });
+          if (resp.ok) return base;
+        } catch {
+          // Try the next candidate.
+        }
+      }
+      throw new Error(
+        "Could not find src/pdf_reflow/. Serve the repo root " +
+        "(python3 -m http.server) or the built _site/ tree.",
+      );
+    })();
+    sourceBasePromise.catch(() => { sourceBasePromise = null; });
+  }
+  return sourceBasePromise;
+}
 
 const PRESETS = {
   "iphone17":     { width: 360, height: 640, label: "iPhone 17 (360×640)" },
@@ -216,11 +258,12 @@ async function ensurePyodide() {
     logLine(`PyMuPDF installed from ${PYMUPDF_WHEEL_URL}.`);
 
     setStatus("Loading pdf_reflow Python sources…", "busy");
+    const sourceBase = await resolveSourceBase();
     pyodide.FS.mkdirTree("/pdf_reflow");
     for (const name of PDF_REFLOW_SOURCES) {
-      const resp = await fetch(`src/pdf_reflow/${name}`);
+      const resp = await fetch(`${sourceBase}${name}`);
       if (!resp.ok) {
-        throw new Error(`Failed to fetch src/pdf_reflow/${name}: ${resp.status}`);
+        throw new Error(`Failed to fetch ${sourceBase}${name}: ${resp.status}`);
       }
       const text = await resp.text();
       pyodide.FS.writeFile(`/pdf_reflow/${name}`, text);
