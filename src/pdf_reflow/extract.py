@@ -15,6 +15,8 @@ from typing import Iterable, List, Optional, Tuple
 
 import fitz
 
+from .mathfont import is_math_font
+
 
 BBox = Tuple[float, float, float, float]
 
@@ -52,6 +54,18 @@ def normalize_text(text: str) -> str:
 
 
 @dataclass
+class MathFragment:
+    source_page: int
+    rect: BBox
+    baseline: float
+    size: float
+    text: str
+    display: bool = False
+    glyph_regions: list = field(default_factory=list)
+    rules: list = field(default_factory=list)
+
+
+@dataclass
 class Span:
     text: str
     bbox: BBox
@@ -59,6 +73,9 @@ class Span:
     size: float
     flags: int          # PyMuPDF span flags (bit 4 = bold, bit 1 = italic, bit 2 = serif)
     color: int
+    origin: Optional[Tuple[float, float]] = None
+    math: Optional[MathFragment] = None
+    math_candidate: bool = False
 
     @property
     def x0(self) -> float: return self.bbox[0]
@@ -107,6 +124,7 @@ class Drawing:
     """A vector drawing primitive (line, rect, curve) reduced to its bbox."""
     bbox: BBox
     kind: str  # 'l','re','c', etc. from MuPDF's drawing dicts
+    width: float = 0.0
 
 
 @dataclass
@@ -133,25 +151,22 @@ def extract_page(page: fitz.Page, index: int) -> PageContent:
     rect = tuple(page.rect)  # type: ignore[arg-type]
     pc = PageContent(index=index, rect=rect)
 
-    raw = page.get_text("rawdict", flags=fitz.TEXTFLAGS_RAWDICT)
+    # The analyzer consumes whole spans, never individual glyphs. DICT
+    # supplies the same span text / union bbox without allocating a dict
+    # for every character. Images are enumerated separately below; keeping
+    # them here needlessly decompresses and copies their pixel streams.
+    raw = page.get_text("dict", flags=fitz.TEXTFLAGS_DICT & ~fitz.TEXT_PRESERVE_IMAGES)
     for block in raw.get("blocks", []):
         if block.get("type") != 0:
             continue
         for line in block.get("lines", []):
             for span in line.get("spans", []):
-                # rawdict gives chars individually; join into a span text.
-                chars = span.get("chars") or []
-                if chars:
-                    text = "".join(c.get("c", "") for c in chars)
-                    # Use the char bbox union for accurate span bbox.
-                    xs = [c["bbox"][0] for c in chars] + [c["bbox"][2] for c in chars]
-                    ys = [c["bbox"][1] for c in chars] + [c["bbox"][3] for c in chars]
-                    bbox = (min(xs), min(ys), max(xs), max(ys))
-                else:
-                    text = span.get("text", "")
-                    bbox = tuple(span.get("bbox", (0, 0, 0, 0)))  # type: ignore[arg-type]
+                text = span.get("text", "")
+                bbox = tuple(span.get("bbox", (0, 0, 0, 0)))
                 text = normalize_text(text)
-                if not text.strip():
+                # Some TeX extension fonts encode a visible integral as
+                # a space. Its glyph still has a real box and must survive.
+                if not text.strip() and not is_math_font(span.get("font", "")):
                     continue
                 pc.spans.append(
                     Span(
@@ -161,14 +176,18 @@ def extract_page(page: fitz.Page, index: int) -> PageContent:
                         size=float(span.get("size", 0.0)),
                         flags=int(span.get("flags", 0)),
                         color=int(span.get("color", 0)),
+                        origin=tuple(span["origin"]) if "origin" in span else None,
                     )
                 )
 
-    for d in page.get_drawings():
+    # Compact drawings use tuples instead of Point / Rect wrappers for
+    # every path vertex; only the enclosing rect and type are needed.
+    for d in page.get_cdrawings():
         bbox = d.get("rect")
         if bbox is None:
             continue
-        pc.drawings.append(Drawing(bbox=tuple(bbox), kind=d.get("type", "")))
+        pc.drawings.append(Drawing(bbox=tuple(bbox), kind=d.get("type", ""),
+                                   width=float(d.get("width") or 0.0)))
 
     for img in page.get_image_info(hashes=False, xrefs=True):
         bbox = img.get("bbox")

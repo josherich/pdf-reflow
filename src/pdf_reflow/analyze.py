@@ -13,7 +13,8 @@ from collections import Counter
 from typing import List, Optional, Tuple
 
 from .cjk_fonts import is_cjk_char as _is_cjk_char
-from .extract import PageContent, Span
+from .extract import MathFragment, PageContent, Span
+from .mathfont import is_math_font as _math_font
 
 
 BBox = Tuple[float, float, float, float]
@@ -69,20 +70,22 @@ class Block:
         # of the source column width. Re-inserting a space here would
         # both look wrong and let the re-wrap split the CJK run there,
         # marooning Latin tokens against a stray space.
-        out: List[str] = []
+        parts: List[str] = []
         for ln in self.lines:
-            t = ln.text.rstrip()
-            if out and out[-1].endswith("-") and len(out[-1]) > 1 and out[-1][-2].isalpha():
-                out[-1] = out[-1][:-1] + t.lstrip()
-            else:
-                t = t.lstrip() if out else t
-                if out:
-                    prev_last = out[-1][-1] if out[-1] else ""
-                    next_first = t[:1]
-                    if not (_is_cjk_char(prev_last) and _is_cjk_char(next_first)):
-                        out.append(" ")
-                out.append(t)
-        return "".join(out).strip()
+            t = ln.text.strip()
+            if not t:
+                continue
+            if parts:
+                prev = parts[-1]
+                if prev.endswith("-") and len(prev) > 1 and prev[-2].isalpha():
+                    # Lowercase continuations undo typesetter hyphenation;
+                    # uppercase acronyms (Megatron-LM) keep the hyphen.
+                    if t[:1].islower():
+                        parts[-1] = prev[:-1]
+                elif not (_is_cjk_char(prev[-1]) and _is_cjk_char(t[0])):
+                    parts.append(" ")
+            parts.append(t)
+        return "".join(parts)
 
 
 @dataclass
@@ -102,41 +105,10 @@ class FlowItem:
     indent: float = 0.0                 # for 'toc': source-pt indent of the entry relative to the block column
     family: str = "serif"               # 'serif' | 'sans' — mirrors source typeface for output
     column: int = 0                     # source column / reading-order lane the item came from
+    inline_math: dict[str, MathFragment] = field(default_factory=dict)
+    math_fragments: List[MathFragment] = field(default_factory=list)
     is_equation: bool = False           # for 'figure': the raster is display math (no vector art),
                                         #   so it must not be upscaled past its authored size
-
-
-# Font-name prefixes that identify math-only glyph fonts. LaTeX's
-# Computer Modern math fonts (CMMI, CMSY, CMEX) and AMS extensions
-# (MSAM, MSBM) emit math symbols at real Unicode codepoints (π, ∞, ℵ, …)
-# rather than the Private Use Area, so a PUA-only check misses them.
-# Latin Modern, RSFS (script), Euler and Stix Math variants follow the
-# same naming convention.
-_MATH_FONT_PREFIXES = (
-    "CMMI", "CMSY", "CMEX",
-    "MSAM", "MSBM",
-    "LMMI", "LMSY", "LMEX",
-    "RSFS",
-    "EUSM", "EUSB", "EUEX", "EUFM", "EURB", "EURM",
-    "STIXMath", "STIX-Math",
-)
-
-
-def _math_font(name: str) -> bool:
-    """Return True if ``name`` is a font that exists solely to render math
-    glyphs (its presence is a strong signal that the host block is an
-    equation, not body text)."""
-    if not name:
-        return False
-    if "Math" in name and "MathJax" not in name:
-        return True
-    # PyMuPDF font names can have a 6-char "+ABCDEF" subset prefix and a
-    # weight/style suffix after a hyphen; strip both before matching.
-    head = name
-    if "+" in head:
-        head = head.split("+", 1)[1]
-    head = head.split("-", 1)[0]
-    return any(head.startswith(p) for p in _MATH_FONT_PREFIXES)
 
 
 def _line_math_score(line: "Line") -> float:
@@ -493,6 +465,8 @@ def _group_blocks(lines: List[Line], page_index: int, body_size: float = 10.0) -
         # math-font fraction changes substantially.
         prev_math = _line_math_score(prev) >= 0.35
         cur_math = _line_math_score(ln) >= 0.35
+        prev_display = any(s.math and s.math.display for s in prev.spans)
+        cur_display = any(s.math and s.math.display for s in ln.spans)
         # A fully-bold line followed by a regular-weight line (or vice
         # versa) is a run-in subheading boundary, not a paragraph
         # continuation — keep them as distinct blocks so the bold tag
@@ -561,6 +535,7 @@ def _group_blocks(lines: List[Line], page_index: int, body_size: float = 10.0) -
             and not cur_para_indent
             and not prev_toc
             and not cur_toc
+            and not prev_display and not cur_display
         ):
             current.append(ln)
         else:
@@ -751,6 +726,9 @@ def _classify_blocks(blocks: List[Block], body_size: float) -> None:
     """Tag each block kind."""
     for b in blocks:
         t = b.text.strip()
+        if any(s.math and s.math.display for ln in b.lines for s in ln.spans):
+            b.kind = "display_math"
+            continue
         # All-numeric short tokens or page-number-looking lines: drop (mark as label).
         if len(t) <= 4 and t.replace(".", "").replace(",", "").isdigit():
             b.kind = "label"
@@ -1083,7 +1061,7 @@ def _figure_regions_in_extent(
             continue
         bw = b.bbox[2] - b.bbox[0]
         is_narrow_fragment = bw < 40.0 and len(b.text.strip()) <= 6
-        if b.kind in ("body", "heading", "toc") and not (b.kind == "body" and is_narrow_fragment):
+        if b.kind in ("body", "heading", "toc", "display_math") and not (b.kind == "body" and is_narrow_fragment):
             continue
         by0, by1 = b.bbox[1], b.bbox[3]
         for band in bands:
@@ -1266,7 +1244,7 @@ def _figure_regions(page: PageContent, blocks: List[Block], body_size: float) ->
             continue
         bw = b.bbox[2] - b.bbox[0]
         is_narrow_fragment = bw < 40.0 and len(b.text.strip()) <= 6
-        if b.kind in ("body", "heading", "toc") and not (b.kind == "body" and is_narrow_fragment):
+        if b.kind in ("body", "heading", "toc", "display_math") and not (b.kind == "body" and is_narrow_fragment):
             continue
         for band in bands:
             # Downward extension is tighter than upward: we don't want a
@@ -1397,9 +1375,13 @@ def _analyze_two_column(
                 continue
             if _is_page_chrome(b, page.height, body_size):
                 continue
+            if b.kind == "display_math":
+                fragment = next(s.math for ln in b.lines for s in ln.spans if s.math)
+                items_with_key.append((sort_col, b.bbox[1], 0, FlowItem(
+                    kind="figure", page_index=page.index, bbox=fragment.rect,
+                    source_rect=fragment.rect, column=sort_col, is_equation=True, math_fragments=[fragment])))
+                continue
             if b.kind == "equation":
-                if (b.bbox[3] - b.bbox[1]) < body_size or b.size < body_size - 1.0:
-                    continue
                 src_rect = (max(x_lo, b.bbox[0] - 4), b.bbox[1] - 2,
                             min(x_hi, b.bbox[2] + 4), b.bbox[3] + 2)
                 items_with_key.append((sort_col, b.bbox[1], 0, FlowItem(
@@ -1475,6 +1457,12 @@ def _analyze_two_column(
         if in_full_fig:
             continue
         sort_col = 0 if cy < band_start else 3
+        if b.kind == "display_math":
+            fragment = next(s.math for ln in b.lines for s in ln.spans if s.math)
+            items_with_key.append((sort_col, b.bbox[1], 0, FlowItem(
+                kind="figure", page_index=page.index, bbox=fragment.rect,
+                source_rect=fragment.rect, column=sort_col, is_equation=True, math_fragments=[fragment])))
+            continue
         items_with_key.append((sort_col, b.bbox[1], 0, FlowItem(
             kind=b.kind, page_index=page.index, bbox=b.bbox,
             text=b.text, size=b.size, bold=b.bold, italic=b.italic,
@@ -1496,11 +1484,7 @@ def _analyze_two_column(
     return [it for *_, it in items_with_key]
 
 
-def analyze_page(page: PageContent, body_size: float) -> List[FlowItem]:
-    ncols, mid = _detect_columns_from_spans(page.spans, page.width)
-    if ncols >= 2:
-        return _analyze_two_column(page, body_size, mid)
-
+def _analyze_single_column(page: PageContent, body_size: float) -> List[FlowItem]:
     lines = _group_lines(page.spans)
     # Split LaTeX-style run-in subheadings ("Architecture and Learning Setup
     # The PARL framework adopts a decoupled ...") into a bold-only line
@@ -1559,16 +1543,16 @@ def analyze_page(page: PageContent, body_size: float) -> List[FlowItem]:
         # like "2 X. BURPS, P. GURPS" in academic papers).
         if _is_page_chrome(b, page.height, body_size):
             continue
+        if b.kind == "display_math":
+            fragment = next(s.math for ln in b.lines for s in ln.spans if s.math)
+            items_with_y.append((b.column, b.bbox[1], FlowItem(
+                kind="figure", page_index=page.index, bbox=fragment.rect,
+                source_rect=fragment.rect, column=b.column, is_equation=True, math_fragments=[fragment])))
+            continue
         # Equations: rasterize the area instead of trying to typeset.
         if b.kind == "equation":
-            # Sub-baseline fragments (just the limits of an inline ∫ or ∑,
-            # like "i=1" sitting under a body-text math expression) make
-            # terrible standalone images: the source crop is a few-px-tall
-            # sliver that gets blown up to fill the column. We can't
-            # render them well in isolation and the parent expression is
-            # in the body line above, so drop them.
-            if (b.bbox[3] - b.bbox[1]) < body_size or b.size < body_size - 1.0:
-                continue
+            # Unknown math that escaped object recovery still survives as
+            # a source crop. Small scripts are never silently discarded.
             src_rect = (max(page_margin, b.bbox[0] - 4), b.bbox[1] - 2,
                         min(page.width - page_margin, b.bbox[2] + 4), b.bbox[3] + 2)
             item = FlowItem(
@@ -1663,6 +1647,20 @@ def analyze_page(page: PageContent, body_size: float) -> List[FlowItem]:
 
     items_with_y.sort(key=lambda t: (t[0], t[1]))
     return [it for _, _, it in items_with_y]
+
+
+def analyze_page(page: PageContent, body_size: float) -> List[FlowItem]:
+    from .mathflow import prepare_math
+
+    ncols, mid = _detect_columns_from_spans(page.spans, page.width)
+    lanes = _partition_spans_by_column(page.spans, mid) if ncols >= 2 else None
+    prepared, fragments = prepare_math(page, body_size, lanes)
+    items = (_analyze_two_column(prepared, body_size, mid) if ncols >= 2
+             else _analyze_single_column(prepared, body_size))
+    if fragments:
+        for item in items:
+            item.inline_math = {key: fragments[key] for key in set(item.text) & fragments.keys()}
+    return items
 
 
 def body_font_size(pages: List[PageContent]) -> float:
@@ -1766,12 +1764,25 @@ def _merge_continuation_items(items: List[FlowItem]) -> List[FlowItem]:
     so reading order is never altered.
     """
     out: List[FlowItem] = []
+    previous_source: Optional[FlowItem] = None
     for it in items:
-        if out and _items_continue(out[-1], it):
+        # A merged item retains its first source page/bbox. Compare lanes
+        # using the last source item so a second paragraph on the final
+        # page is not mistaken for another cross-page continuation.
+        if previous_source is not None and _items_continue(previous_source, it):
             prev = out[-1]
-            prev.text = _join_continuation_text(prev.text, it.text)
-            continue
-        out.append(it)
+            text = it.text
+            for key, fragment in it.inline_math.items():
+                if key in prev.inline_math:
+                    replacement = next(chr(c) for c in range(0xF0000, 0xFFFFE)
+                                       if chr(c) not in prev.inline_math and chr(c) not in it.inline_math)
+                    text = text.replace(key, replacement)
+                    key = replacement
+                prev.inline_math[key] = fragment
+            prev.text = _join_continuation_text(prev.text, text)
+        else:
+            out.append(it)
+        previous_source = it
     return out
 
 

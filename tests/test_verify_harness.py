@@ -75,6 +75,11 @@ class BaselineTests(unittest.TestCase):
         deltas = compare_fixture({"clipped_lines": 0}, {"clipped_lines": 1})
         self.assertTrue(has_gating_regression(deltas))
 
+    def test_lost_math_span_gates(self):
+        deltas = compare_fixture({"math_span_retention": 1.0},
+                                 {"math_span_retention": 0.999})
+        self.assertTrue(has_gating_regression(deltas))
+
     def test_improvement_is_not_regression(self):
         deltas = compare_fixture({"w_minus": 10}, {"w_minus": 0})
         self.assertFalse(has_gating_regression(deltas))

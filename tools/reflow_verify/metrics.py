@@ -14,6 +14,7 @@ import re
 import time
 import unicodedata
 from dataclasses import dataclass, field, asdict
+from functools import lru_cache
 from typing import Dict, List, Tuple
 
 import fitz
@@ -21,12 +22,25 @@ import fitz
 from pdf_reflow import reflow_pdf, ReflowConfig
 from pdf_reflow.extract import extract_document
 from pdf_reflow.analyze import analyze_document
+from pdf_reflow.cjk_fonts import is_cjk_char
 
 
 # Text-bearing FlowItem kinds, in the order the pipeline reads them.
 _TEXT_KINDS = {"heading", "body", "caption", "toc", "label", "code"}
 _PUA_RE = re.compile("[\ue000-\uf8ff]")  # Unicode Private Use Area (math-font garbage)
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
+
+
+@lru_cache(maxsize=1024)
+def _source_math_font(name: str) -> bool:
+    # Keep the source oracle independent of the implementation being
+    # benchmarked, including when evaluating a previous checkout.
+    head = name.split("+", 1)[-1].split("-", 1)[0].upper()
+    return (("Math" in name and "MathJax" not in name)
+            or head.startswith(("CMMI", "CMSY", "CMEX", "MSAM", "MSBM", "LMMI", "LMSY",
+                                "LMEX", "RSFS", "EUSM", "EUSB", "EUEX", "EUFM", "EURB",
+                                "EURM", "STIXMATH"))
+            or head in {"SYMBOL", "SYMBOLMT", "STANDARDSYML", "OPENSYMBOL"})
 
 
 def _norm(s: str) -> str:
@@ -36,7 +50,20 @@ def _norm(s: str) -> str:
 
 
 def _tokens(s: str) -> List[str]:
-    return _WORD_RE.findall(_norm(s))
+    # CJK has no inter-word spaces. Treating an entire Han run as one
+    # word makes every harmless output line break look like lost text.
+    result = []
+    for word in _WORD_RE.findall(_norm(s)):
+        start = 0
+        for i, ch in enumerate(word):
+            if is_cjk_char(ch):
+                if i > start:
+                    result.append(word[start:i])
+                result.append(ch)
+                start = i + 1
+        if start < len(word):
+            result.append(word[start:])
+    return result
 
 
 def _wordchars(s: str) -> str:
@@ -62,6 +89,11 @@ def reference_stream(items) -> Tuple[List[str], List[str]]:
             text = "\n".join(it.code_lines)
         else:
             text = it.text
+        # Inline formulas are preserved as original glyph outlines rather
+        # than reconstructed Unicode. Score prose here; formula placement
+        # and source-component preservation have independent regressions.
+        for key in getattr(it, "inline_math", {}):
+            text = text.replace(key, " ")
         if it.kind == "heading" and _norm(text):
             headings.append(text)
         if it.kind in _TEXT_KINDS:
@@ -193,6 +225,41 @@ def figure_balance(items, out_doc: "fitz.Document") -> Dict[str, int]:
     return {"figures_wanted": wanted, "images_rendered": rendered}
 
 
+def math_preservation(src_doc, items) -> Dict[str, float]:
+    """Account for source math spans independently of the analyzer's text.
+
+    Every source math-font span (including space-encoded operators) must
+    survive in a complete figure crop or an inline glyph selection.
+    This catches the old path that simply discarded small scripts.
+    Source-region regressions additionally pin exact formula boundaries.
+    """
+    total = kept = 0
+    for page in src_doc:
+        figures = [it.source_rect or it.bbox for it in items
+                   if it.page_index == page.number and it.kind == "figure"]
+        glyph_regions = [region[0] for it in items
+                         for fragment in (list(getattr(it, "inline_math", {}).values())
+                                          + getattr(it, "math_fragments", []))
+                         if fragment.source_page == page.number
+                         for region in fragment.glyph_regions]
+        for block in page.get_text("dict", flags=fitz.TEXTFLAGS_DICT & ~fitz.TEXT_PRESERVE_IMAGES)["blocks"]:
+            for line in block.get("lines", []):
+                for span in line["spans"]:
+                    if (not _source_math_font(span["font"])
+                            or span["text"].strip() in {"•", "▪", "◦", "‣", "●", "○"}):
+                        continue
+                    total += 1
+                    r = span["bbox"]
+                    if any(abs(r[0] - g[0]) < 0.01 and abs(r[1] - g[1]) < 0.01
+                           and abs(r[2] - g[2]) < 0.01 and abs(r[3] - g[3]) < 0.01 for g in glyph_regions):
+                        kept += 1
+                    elif any(f[0] - 0.5 <= r[0] and f[1] - 0.5 <= r[1]
+                             and r[2] <= f[2] + 0.5 and r[3] <= f[3] + 0.5 for f in figures):
+                        kept += 1
+    return {"math_spans": total, "math_spans_preserved": kept,
+            "math_span_retention": round(kept / total, 4) if total else 1.0}
+
+
 @dataclass
 class FixtureScore:
     name: str
@@ -228,6 +295,7 @@ def score_fixture(pdf_path: str, out_path: str, cfg: ReflowConfig | None = None)
     src = fitz.open(pdf_path)
     try:
         items, _ = analyze_document(extract_document(src))
+        math_metrics = math_preservation(src, items)
     finally:
         src.close()
     ref_tokens, headings = reference_stream(items)
@@ -239,6 +307,7 @@ def score_fixture(pdf_path: str, out_path: str, cfg: ReflowConfig | None = None)
         metrics.update(heading_retention(headings, out_doc))
         metrics.update(render_quality(out_doc))
         metrics.update(figure_balance(items, out_doc))
+        metrics.update(math_metrics)
         metrics["seconds"] = round(seconds, 3)
         return FixtureScore(
             name=pdf_path.rsplit("/", 1)[-1],

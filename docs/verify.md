@@ -40,6 +40,7 @@ PDF-extraction taxonomy plus reflow-specific invariants:
 | `retention` | matched words / reference words — the headline | ● |
 | `w_minus` / `w_plus` / `w_tilde` | words dropped / spurious / changed | ● (−, ~) |
 | `heading_retention` | source headings that survive into output | ● |
+| `math_span_retention` | source math-font spans accounted for by complete formulas or figures | ● |
 | `clipped_lines` | lines whose text runs past the page edge (looks broken) | ● |
 | `pua_chars` | private-use math-font glyphs leaking into text | ● |
 | `output_pages`, `images_rendered`, `widow_lines`, `seconds` | informational | |
@@ -116,3 +117,77 @@ PDFs (arXiv papers across fields, manuals, datasheets, more CJK) into
 - **New metric:** add it to the dict returned by a function in
   `metrics.py`, then add a rule in `baseline.py:METRIC_RULES` (direction,
   tolerance, whether it gates).
+
+## Repeated benchmarks and independent accuracy probes
+
+Use the benchmark runner for measured hill climbing. It records warmups
+separately, keeps every timing sample, and compares median **full production
+reflow** time (including outlines, font subsetting, compression, and saving).
+Quality scoring runs outside those timing samples. Run the two commands on
+the same machine and runtime, without competing workloads:
+
+```bash
+# Before changing the algorithm:
+uv run python tools/benchmark.py --repeat 5 --warmup 1 --output /tmp/before.json
+
+# After changing it:
+uv run python tools/benchmark.py --repeat 5 --warmup 1 \
+  --compare /tmp/before.json --output /tmp/after.json
+
+# A faster loop on selected fixtures; both runs must use the same selection:
+uv run python tools/benchmark.py --fixtures bitcoin.pdf two-column.pdf \
+  --repeat 5 --output /tmp/small.json
+```
+
+The JSON includes source-code and fixture SHA-256 fingerprints, runtime,
+configuration, raw timings, output sizes, and verify metrics. Comparisons
+reject changed fixtures/runtimes/settings, fail existing quality gates, and
+fail median slowdowns above 15% (configurable with `--max-slowdown`). Timings
+are machine-specific; committed examples in `verify/benchmarks/` document a
+single before/after experiment, rather than portable CI time budgets.
+`tests/test_benchmark.py` continues to enforce generous CI budgets.
+
+The ordinary verify command also runs seven **independent accuracy
+probes**, with expectations written independently of the analyzer's output:
+
+- preserve a compound hyphen before an uppercase line continuation;
+- fit very long code lines without losing characters or indentation;
+- keep a heading with the first following body line;
+- stop cross-page paragraph merging at a deliberate same-column boundary;
+- keep equation (7) on original `llm-cjk.pdf` page 11 out of the following definition paragraph;
+- keep that page's inline radical, its bar, and its radicand on the body baseline;
+- preserve all rows and subscripts of the MIT sample's aligned equation.
+
+These probes gate verification even when no numeric baseline exists or a
+baseline is being updated. They address a limitation of the original
+retention reference: because it comes from the analyzer, it cannot detect
+text that the analyzer itself already lost or merged incorrectly. The
+probes cover specific regressions, not general ground-truth reading order.
+
+
+## Formula verification and score schema 2
+
+The word score is a **prose transport** check, not a mathematical correctness
+score. Inline formula objects are excluded from its reference because their
+source outlines are rendered as paths. The independent `math_span_retention`
+metric enumerates math-font spans directly from the source PDF, including
+space-encoded integral glyphs, and checks that each is accounted for in an
+inline glyph selection or a complete display/figure crop. A loss of any
+previously retained span fails the gate. Component accounting alone does not
+prove the formula's geometry or semantics: source-coordinate regressions
+and rendered inspection remain necessary.
+
+`tests/test_math_flow.py` pins the user's original page-11 case (equation
+bounds, intact surrounding definition, radical rule and baseline), inline
+sum/integral limits, aligned rows, ordinary-font scripted variables, and
+narrow-page wrapping. Glyph isolation has a separate nonblank-outline check,
+so an empty SVG conversion cannot pass merely because an image/object exists.
+
+Schema 2 also tokenizes CJK one character at a time. A whole unspaced Chinese
+run was formerly counted as one word, making harmless mobile line breaks
+look like missing text. Benchmark JSON now carries `quality_schema` and
+rejects comparisons across scoring versions. The numeric baseline was
+first migrated by rescoring the **previous implementation**, then promoted
+after the paired comparison and formula regressions passed; paired formula
+benchmarks retain both runs.
+English word tokenization and existing gate tolerances are unchanged.

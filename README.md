@@ -3,8 +3,9 @@
 From ![before](./tests/fixtures/before.png) to ![after](./tests/fixtures/after.png) in one step.
 
 Convert any text-heavy PDF (academic paper, manual, datasheet) into a
-single-column PDF sized for a phone screen. Diagrams and equations are
+single-column PDF sized for a phone screen. Diagrams and display equations are
 rasterized from the original page and scaled to fit the new column width;
+inline formulas retain their original glyph outlines, scripts, and rules;
 running headers/footers/page numbers are dropped; code blocks keep their
 line breaks; section headings keep their hierarchy.
 
@@ -49,10 +50,12 @@ semantic tagging → re-paginate). We don't use any ML; the heuristics below
 hold up well for technical PDFs.
 
 1. **Extract** (`extract.py`)
-   PyMuPDF returns text in `rawdict` form. We iterate every glyph, taking
-   its exact bbox, font, size, flags, and color. Vector drawing primitives
-   (lines, rectangles, paths) are reduced to bounding boxes. Embedded
-   raster images get an entry too.
+   PyMuPDF returns compact text spans in `dict` form, preserving their
+   text, exact bbox, font, size, flags, and color without allocating
+   per-glyph dictionaries or copying embedded image streams. Vector
+   drawing primitives (lines, rectangles, paths) are extracted in compact
+   form and reduced to bounding boxes. Embedded raster images get an
+   entry too.
 
 2. **Lines & blocks** (`analyze.py`)
    - **Lines:** group spans whose vertical midpoints differ by less than
@@ -63,6 +66,12 @@ hold up well for technical PDFs.
      as "body text" for the rest of the pipeline.
 
 3. **Classification** (`analyze.py`)
+   Before prose grouping, `mathflow.py` anchors mathematical runs to body
+   baselines, attaches their subscripts/superscripts, and separates display
+   rows from prose. It recognizes TeX/Symbol fonts and scripted variables
+   in ordinary italic fonts. Inline expressions become indivisible objects
+   with their own width, ascent, and descent.
+
    Each block is tagged as one of:
    - `heading` — size > body + 1pt and bold, or much bigger than body
    - `body` — body-sized prose
@@ -94,11 +103,19 @@ hold up well for technical PDFs.
      chosen by the Knuth-Plass total-fit algorithm (`linebreak.py`,
      `knuth_plass.py`) so the right margin is balanced instead of greedily
      ragged.
+   - Inline formulas wrap together with surrounding prose. `math_render.py`
+     selects the original glyph outlines and fraction/radical rules from
+     MuPDF's SVG export, excluding neighboring prose even when their font
+     boxes overlap. Formula outlines preserve appearance; they do not add
+     semantic LaTeX or searchable formula text.
    - Figures are clipped from the original page (tightened horizontally to
      the actual content bbox in the band) and rasterized at 220 dpi,
      scaled to fit the column width.
    - Small code blocks are kept together on one page; large code blocks
-     are scaled down so the longest line fits the column.
+     are scaled down so the longest line fits the column. Lines that
+     still overflow at 6 pt wrap without losing text or indentation.
+   - Headings stay with the first following text line when they fit
+     together on a page.
 
 ## How this compares to Adobe's Liquid Mode
 
@@ -317,3 +334,6 @@ uv run python -m unittest tests.test_benchmark -v
 # Or print a timing report
 uv run python -m tests.test_benchmark --report
 ```
+
+For repeated before/after measurements with quality gates and independent
+accuracy probes, use `tools/benchmark.py`; see [the benchmark workflow](docs/verify.md#repeated-benchmarks-and-independent-accuracy-probes).

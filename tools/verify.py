@@ -33,6 +33,7 @@ from reflow_verify import baseline as bl  # noqa: E402
 from reflow_verify import report as rpt  # noqa: E402
 from reflow_verify import visual as vz  # noqa: E402
 from reflow_verify import webtool as wt  # noqa: E402
+from reflow_verify.probes import run_probes  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURE_DIR = os.path.join(ROOT, "tests", "fixtures")
@@ -133,11 +134,15 @@ def main() -> int:
 
     scores: List[FixtureScore] = []
     new_baseline: Dict[str, Dict[str, float]] = {}
-    any_gate_fail = False
+    probes = run_probes()
+    any_gate_fail = not all(probes.values())
     any_feedback = False
     index_rows: List[Dict[str, object]] = []
 
     print(f"pdf_reflow verify  {DIM}(MuPDF {fitz.VersionFitz}, PyMuPDF {fitz.VersionBind}){RESET}\n")
+    for name, passed in probes.items():
+        print(f"  {'PASS' if passed else 'FAIL'}  accuracy probe: {name}")
+    print()
 
     for pdf in fixtures:
         name = os.path.basename(pdf)
@@ -172,6 +177,7 @@ def main() -> int:
         print(
             f"  {_c(status, color)}  {name:<34} "
             f"ret={flat['retention']:.3f} head={flat['heading_retention']:.2f} "
+            f"math={flat['math_span_retention']:.3f} "
             f"clip={flat['clipped_lines']} pua={flat['pua_chars']} "
             f"{flat['output_pages']}pg {score.seconds:.2f}s{extra}"
         )
@@ -221,19 +227,19 @@ def main() -> int:
             json.dump(new_baseline, f, indent=2, sort_keys=True)
             f.write("\n")
         print(f"\n  {_c('baseline updated', GREEN)}: {BASELINE_PATH}")
-        return 0
+        return int(not all(probes.values()))
 
     if not baseline:
         print(f"\n  {_c('no baseline yet', YELLOW)} — review the numbers above, then:"
               f"\n      uv run python tools/verify.py --update-baseline")
-        return 0
+        return int(not all(probes.values()))
 
     print()
     if any_feedback:
         print(_c("  human visual feedback present — read it with: "
                  "uv run python tools/verify.py --feedback", DIM))
     if any_gate_fail:
-        print(_c("  REGRESSION: a gating metric moved the wrong way vs baseline.", RED))
+        print(_c("  REGRESSION: an accuracy probe failed or a gating metric regressed.", RED))
         return 1
     print(_c("  all fixtures within baseline tolerances.", GREEN))
     return 0

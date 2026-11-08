@@ -16,6 +16,7 @@ from typing import List, Optional, Tuple
 import fitz
 
 from .analyze import FlowItem, _parse_toc_entry
+from .extract import MathFragment
 from .cjk_fonts import (
     SCRIPT_HAN,
     SCRIPT_JAPAN,
@@ -71,6 +72,17 @@ class DrawImage:
     h: float
     source_page: int    # index into original document
     source_rect: Tuple[float, float, float, float]
+
+
+@dataclass
+class DrawMath:
+    x: float
+    y: float
+    w: float
+    h: float
+    source_page: int
+    source_rect: Tuple[float, float, float, float]
+    fragment: Optional[MathFragment] = None
 
 
 @dataclass
@@ -542,6 +554,7 @@ def _wrap_paragraph(
     font: str,
     size: float,
     max_width: float,
+    inline_math: Optional[dict[str, MathFragment]] = None,
 ) -> List[str]:
     """Wrap ``text`` to ``max_width`` with Unicode-aware, optimal breaks.
 
@@ -559,15 +572,18 @@ def _wrap_paragraph(
     """
     if not text:
         return []
+    def measure(t: str) -> float:
+        return _rich_width(t, font, size, max_width, inline_math)
+
     boxes, seps = _uax14_segments(text)
     if not boxes or (len(boxes) == 1 and boxes[0] == ""):
         return []
     # Single unbreakable run: emit as-is, or force-break if it overflows.
     if len(seps) == 0:
         only = boxes[0]
-        if _multifont_width(only, font, size) <= max_width:
+        if measure(only) <= max_width:
             return [only]
-        return _break_oversize_word(only, font, size, max_width)
+        return _break_oversize_word(only, font, size, max_width, inline_math)
 
     space_w = FontMetrics.width(font, " ", size)
     stretch = max(space_w * 3.0, 1.0)
@@ -579,19 +595,19 @@ def _wrap_paragraph(
     items: List[object] = []
 
     def add_box(t: str) -> None:
-        w = _multifont_width(t, font, size)
+        w = measure(t)
         if w > max_width and len(t) > 1:
             # No legal break inside this run but it overflows the column;
             # fall back to character chunking (an "emergency" break) and
             # let the optimiser break between the chunks.
-            chunks = _break_oversize_word(t, font, size, max_width)
+            chunks = _break_oversize_word(t, font, size, max_width, inline_math)
             for ci, chunk in enumerate(chunks):
                 if ci > 0:
                     pieces.append(("sep", _Sep(space=False, hyphen=False,
                                                mandatory=False)))
                     items.append(_KPPenalty(0.0, 0.0, False))
                 pieces.append(("box", chunk))
-                items.append(_KPBox(_multifont_width(chunk, font, size)))
+                items.append(_KPBox(measure(chunk)))
         else:
             pieces.append(("box", t))
             items.append(_KPBox(w))
@@ -631,7 +647,27 @@ def _wrap_paragraph(
     return lines
 
 
-def _break_oversize_word(word: str, font: str, size: float, max_width: float) -> List[str]:
+def _math_scale(fragment: MathFragment, size: float, max_width: float) -> float:
+    return min(size / fragment.size, max_width / max(fragment.rect[2] - fragment.rect[0], 0.01))
+
+
+def _rich_width(text: str, font: str, size: float, max_width: float,
+                inline_math: Optional[dict[str, MathFragment]] = None) -> float:
+    if not inline_math:
+        return _multifont_width(text, font, size)
+    total = 0.0
+    start = 0
+    for i, ch in enumerate(text):
+        fragment = inline_math.get(ch)
+        if fragment is not None:
+            total += _multifont_width(text[start:i], font, size)
+            total += (fragment.rect[2] - fragment.rect[0]) * _math_scale(fragment, size, max_width)
+            start = i + 1
+    return total + _multifont_width(text[start:], font, size)
+
+
+def _break_oversize_word(word: str, font: str, size: float, max_width: float,
+                        inline_math: Optional[dict[str, MathFragment]] = None) -> List[str]:
     """Force-break a word that is wider than the line by chunking characters."""
     chunks: List[str] = []
     start = 0
@@ -641,7 +677,7 @@ def _break_oversize_word(word: str, font: str, size: float, max_width: float) ->
         best = 1
         while lo <= hi:
             mid = (lo + hi) // 2
-            wpx = _multifont_width(word[start:start + mid], font, size)
+            wpx = _rich_width(word[start:start + mid], font, size, max_width, inline_math)
             if wpx <= max_width:
                 best = mid
                 lo = mid + 1
@@ -678,13 +714,21 @@ class _PageBuilder:
 
     def ensure_space(self, h: float) -> None:
         if h > self.remaining():
-            self._open_page()
+            if self.current.ops:
+                self._open_page()
+            else:
+                # An oversized heading may need the full content area.
+                # Discard leading space instead of emitting a blank page.
+                self.y = self.cfg.content_top
 
     def add_space(self, dy: float) -> None:
         self.y += dy
 
     def emit_text_line(self, text: str, font: str, size: float, x: Optional[float] = None,
-                       align: str = "left") -> None:
+                       align: str = "left", inline_math: Optional[dict[str, MathFragment]] = None) -> None:
+        if inline_math and any(ch in inline_math for ch in text):
+            self._emit_rich_line(text, font, size, x, align, inline_math)
+            return
         line_h = size * self.cfg.line_height_mult
         # Reserve descender room: baseline is at y + size.
         if line_h > self.remaining():
@@ -707,6 +751,44 @@ class _PageBuilder:
                 DrawText(x=cx, y=baseline, text=rt, font=rf, size=size))
             cx += FontMetrics.width(rf, rt, size)
         self.y += line_h
+
+    def _emit_rich_line(self, text: str, font: str, size: float, x: Optional[float],
+                        align: str, inline_math: dict[str, MathFragment]) -> None:
+        ascent, descent = size, size * 0.25
+        for ch in text:
+            fragment = inline_math.get(ch)
+            if fragment:
+                scale = _math_scale(fragment, size, self.cfg.content_width)
+                ascent = max(ascent, (fragment.baseline - fragment.rect[1]) * scale)
+                descent = max(descent, (fragment.rect[3] - fragment.baseline) * scale)
+        height = max(size * self.cfg.line_height_mult, ascent + descent + size * 0.1)
+        self.ensure_space(height)
+        baseline = self.y + ascent
+        width = _rich_width(text, font, size, self.cfg.content_width, inline_math)
+        cx = self.cfg.content_left if x is None else x
+        if x is None and align == "center":
+            cx += max(0, (self.cfg.content_width - width) / 2)
+
+        def emit_plain(t: str) -> None:
+            nonlocal cx
+            for rf, rt in _split_into_font_runs(t, font):
+                self.current.ops.append(DrawText(cx, baseline, rt, rf, size))
+                cx += FontMetrics.width(rf, rt, size)
+
+        start = 0
+        for i, ch in enumerate(text):
+            fragment = inline_math.get(ch)
+            if fragment:
+                emit_plain(text[start:i])
+                scale = _math_scale(fragment, size, self.cfg.content_width)
+                w = (fragment.rect[2] - fragment.rect[0]) * scale
+                h = (fragment.rect[3] - fragment.rect[1]) * scale
+                top = baseline - (fragment.baseline - fragment.rect[1]) * scale
+                self.current.ops.append(DrawMath(cx, top, w, h, fragment.source_page, fragment.rect, fragment))
+                cx += w
+                start = i + 1
+        emit_plain(text[start:])
+        self.y += height
 
     def emit_toc_entry(
         self,
@@ -811,7 +893,7 @@ def layout(
     anchors: List[HeadingAnchor] = []
 
     def emit_paragraph(text: str, font: str, size: float, lead_space: float = 0.0,
-                       align: str = "left"):
+                       align: str = "left", inline_math=None):
         text = text.strip()
         if not text:
             return
@@ -821,10 +903,10 @@ def layout(
         # modifier letters, …) to a system Latin-extended font.
         if lead_space:
             pb.add_space(lead_space)
-        for line in _wrap_paragraph(text, font, size, cw):
-            pb.emit_text_line(line, font, size, align=align)
+        for line in _wrap_paragraph(text, font, size, cw, inline_math):
+            pb.emit_text_line(line, font, size, align=align, inline_math=inline_math)
 
-    for it in items:
+    for item_index, it in enumerate(items):
         if it.kind == "heading":
             # Detect title vs section heading vs run-in subheading by
             # comparing the source font size to the inferred body size.
@@ -857,20 +939,34 @@ def layout(
             else:
                 font = _base_font_for(it.family, bold=True, italic=False)
             pb.add_space(space_above)
-            # Ensure room for at least one heading line before recording the
-            # anchor so the anchor page/y reflects any page-break that occurs.
-            pb.ensure_space(size * cfg.line_height_mult)
+            heading_lines = _wrap_paragraph(it.text.strip(), font, size, cw, it.inline_math)
+            heading_height = len(heading_lines) * size * cfg.line_height_mult
+            keep_height = heading_height
+            if item_index + 1 < len(items):
+                following = items[item_index + 1]
+                next_size = {"body": body, "caption": cfg.caption_size,
+                             "code": cfg.code_size}.get(following.kind)
+                if next_size is not None and (following.text or following.code_lines):
+                    keep_height += (cfg.heading_space_below + cfg.para_space
+                                    + next_size * cfg.line_height_mult)
+            # Keep a complete heading with the first following text line
+            # when it fits on a page. Record the anchor after this break.
+            pb.ensure_space(min(keep_height, cfg.content_height))
+            anchor_text = it.text
+            for key, fragment in it.inline_math.items():
+                anchor_text = anchor_text.replace(key, fragment.text)
             anchors.append(HeadingAnchor(
-                text=it.text,
+                text=anchor_text,
                 level=level,
                 out_page=len(pb.pages) - 1,
                 y=pb.y,
             ))
-            emit_paragraph(it.text, font, size, align=it.align)
+            for line in heading_lines:
+                pb.emit_text_line(line, font, size, align=it.align, inline_math=it.inline_math)
             pb.add_space(cfg.heading_space_below)
         elif it.kind == "body":
             font = _base_font_for(it.family, bold=it.bold, italic=it.italic)
-            emit_paragraph(it.text, font, body, lead_space=cfg.para_space, align=it.align)
+            emit_paragraph(it.text, font, body, lead_space=cfg.para_space, align=it.align, inline_math=it.inline_math)
         elif it.kind == "toc":
             parsed = _parse_toc_entry(it.text)
             base = _base_font_for(it.family, bold=False, italic=False)
@@ -891,7 +987,7 @@ def layout(
             )
         elif it.kind == "caption":
             font = _base_font_for(it.family, bold=False, italic=it.italic)
-            emit_paragraph(it.text, font, cfg.caption_size, lead_space=cfg.para_space, align=it.align)
+            emit_paragraph(it.text, font, cfg.caption_size, lead_space=cfg.para_space, align=it.align, inline_math=it.inline_math)
         elif it.kind == "code":
             # Pre-formatted: each source line drawn at code_size. If a line is
             # wider than the column, scale the code_size down for that block
@@ -905,6 +1001,13 @@ def layout(
             longest = max((_multifont_width(ln, font, size) for ln in lines), default=0.0)
             if longest > cw:
                 size = max(6.0, size * cw / longest)
+            # At the readability floor an arbitrarily long source line
+            # can still exceed the column. Wrap it without stripping
+            # whitespace or dropping any characters.
+            lines = [chunk for ln in lines for chunk in (
+                _break_oversize_word(ln, font, size, cw)
+                if _multifont_width(ln, font, size) > cw else [ln]
+            )]
             block_height = cfg.para_space + len(lines) * size * cfg.line_height_mult
             # Keep small code blocks together on one page.
             if block_height <= cfg.content_height * 0.85 and block_height > pb.remaining():
@@ -934,6 +1037,6 @@ def layout(
         else:
             # Unknown kind: fall back to body rendering.
             emit_paragraph(it.text, _base_font_for(it.family, False, False),
-                           body, lead_space=cfg.para_space)
+                           body, lead_space=cfg.para_space, inline_math=it.inline_math)
 
     return pb.pages, anchors

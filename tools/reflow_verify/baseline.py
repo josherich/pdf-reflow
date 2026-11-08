@@ -20,6 +20,7 @@ from typing import Dict, List, Optional
 #   None under "flat" means any change fails.
 METRIC_RULES: Dict[str, Dict[str, object]] = {
     "retention":         {"dir": "up",   "tol": 0.01, "gate": True},
+    "math_span_retention": {"dir": "up", "tol": 0.0, "gate": True},
     "heading_retention": {"dir": "up",   "tol": 0.01, "gate": True},
     "clipped_lines":     {"dir": "down", "tol": 0,    "gate": True},
     "pua_chars":         {"dir": "down", "tol": 0,    "gate": True},

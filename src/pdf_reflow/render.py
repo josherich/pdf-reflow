@@ -14,7 +14,8 @@ from typing import Dict, List, Optional, Tuple
 import fitz
 
 from .cjk_fonts import font_entry_for_fontname
-from .layout import DrawImage, DrawRule, DrawText, LaidOutPage, LayoutConfig
+from .layout import DrawImage, DrawMath, DrawRule, DrawText, LaidOutPage, LayoutConfig
+from .math_render import FormulaRenderer
 
 
 _FONT_ALIASES = {
@@ -146,45 +147,64 @@ def render(
     figure_cache = _prerasterize_figures(source_path, source_doc, pages, cfg, workers)
 
     out = fitz.open()
-    for lop in pages:
-        page = out.new_page(width=lop.width, height=lop.height)
-        # Track system CJK fonts already registered on this page so we
-        # only embed each fontfile once per page — repeated insert_text
-        # calls with fontfile= would otherwise add duplicate font
-        # resources to the page's resource dict.
-        page_cjk_fonts: set = set()
-        for op in lop.ops:
-            if isinstance(op, DrawText):
-                args = _insert_text_args(op.font)
-                fontfile = args.pop("fontfile", None)
-                fontname = args["fontname"]
-                if fontfile is not None and fontname not in page_cjk_fonts:
-                    page.insert_font(fontname=fontname, fontfile=fontfile)
-                    page_cjk_fonts.add(fontname)
-                page.insert_text(
-                    point=(op.x, op.y),
-                    text=op.text,
-                    fontsize=op.size,
-                    color=op.color,
-                    **args,
-                )
-            elif isinstance(op, DrawImage):
-                scale = _figure_scale(op, cfg)
-                key = _figure_key(op, scale)
-                png = figure_cache.get(key)
-                if png is None:
-                    png = _rasterize_one(source_doc, op.source_page, op.source_rect, scale)
-                    figure_cache[key] = png
-                page.insert_image(
-                    rect=fitz.Rect(op.x, op.y, op.x + op.w, op.y + op.h),
-                    stream=png,
-                    keep_proportion=True,
-                )
-            elif isinstance(op, DrawRule):
-                page.draw_line(
-                    p1=(op.x0, op.y),
-                    p2=(op.x1, op.y),
-                    color=(0.6, 0.6, 0.6),
-                    width=0.5,
-                )
+    with FormulaRenderer(source_doc) as formulas:
+        for lop in pages:
+            page = out.new_page(width=lop.width, height=lop.height)
+            # Track system CJK fonts already registered on this page so we
+            # only embed each fontfile once per page — repeated insert_text
+            # calls with fontfile= would otherwise add duplicate font
+            # resources to the page's resource dict.
+            page_cjk_fonts: set = set()
+            text_shape = None
+            for op in lop.ops:
+                # Commit consecutive text runs together. A Page.insert_text
+                # call creates and commits a new Shape (and PDF content stream)
+                # per line. Flush at graphics boundaries to preserve stacking.
+                if not isinstance(op, DrawText) and text_shape is not None:
+                    text_shape.commit()
+                    text_shape = None
+                if isinstance(op, DrawText):
+                    args = _insert_text_args(op.font)
+                    fontfile = args.pop("fontfile", None)
+                    fontname = args["fontname"]
+                    if fontfile is not None and fontname not in page_cjk_fonts:
+                        page.insert_font(fontname=fontname, fontfile=fontfile)
+                        page_cjk_fonts.add(fontname)
+                    if text_shape is None:
+                        text_shape = page.new_shape()
+                    text_shape.insert_text(
+                        point=(op.x, op.y),
+                        buffer=op.text,
+                        fontsize=op.size,
+                        color=op.color,
+                        **args,
+                    )
+                elif isinstance(op, DrawMath):
+                    fragment_doc = formulas.document(op.fragment) if op.fragment else source_doc
+                    page.show_pdf_page(
+                        fitz.Rect(op.x, op.y, op.x + op.w, op.y + op.h),
+                        fragment_doc, 0 if op.fragment else op.source_page,
+                        clip=None if op.fragment else fitz.Rect(op.source_rect),
+                    )
+                elif isinstance(op, DrawImage):
+                    scale = _figure_scale(op, cfg)
+                    key = _figure_key(op, scale)
+                    png = figure_cache.get(key)
+                    if png is None:
+                        png = _rasterize_one(source_doc, op.source_page, op.source_rect, scale)
+                        figure_cache[key] = png
+                    page.insert_image(
+                        rect=fitz.Rect(op.x, op.y, op.x + op.w, op.y + op.h),
+                        stream=png,
+                        keep_proportion=True,
+                    )
+                elif isinstance(op, DrawRule):
+                    page.draw_line(
+                        p1=(op.x0, op.y),
+                        p2=(op.x1, op.y),
+                        color=(0.6, 0.6, 0.6),
+                        width=0.5,
+                    )
+            if text_shape is not None:
+                text_shape.commit()
     return out
